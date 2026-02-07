@@ -1,0 +1,30 @@
+# 环境变量（含凭据）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 测试
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 项目运行时目录
+drafts/
+processed/
+input/
+
+# Claude Code
+.claude/

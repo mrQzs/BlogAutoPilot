@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "blog-autopilot"
+version = "2.0.0"
+description = "Python 自动化博客发布系统"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.0",
+    "requests>=2.28",
+    "pypdf>=3.0",
+    "pydantic-settings>=2.0",
+    "tenacity>=8.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
+]
+
+[project.scripts]
+blog-autopilot = "blog_autopilot.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
