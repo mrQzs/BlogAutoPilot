@@ -2,8 +2,6 @@
 
 import logging
 from functools import lru_cache
-from pathlib import Path
-
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,6 +34,37 @@ class AISettings(BaseSettings):
     default_headers: dict[str, str] = {"User-Agent": "MyBlogWriter/1.0"}
 
 
+class DatabaseSettings(BaseSettings):
+    """PostgreSQL 连接配置"""
+    model_config = SettingsConfigDict(env_prefix="DB_")
+
+    url: SecretStr | None = None
+    host: str = "localhost"
+    port: int = 5432
+    name: str = "blog_articles"
+    user: str = ""
+    password: SecretStr = SecretStr("")
+
+    def get_dsn(self) -> str:
+        """返回 PostgreSQL 连接字符串"""
+        if self.url:
+            return self.url.get_secret_value()
+        return (
+            f"postgresql://{self.user}:{self.password.get_secret_value()}"
+            f"@{self.host}:{self.port}/{self.name}"
+        )
+
+
+class EmbeddingSettings(BaseSettings):
+    """OpenAI Embedding API 配置"""
+    model_config = SettingsConfigDict(env_prefix="EMBEDDING_")
+
+    api_key: SecretStr = SecretStr("")
+    api_base: str = "https://api.openai.com/v1"
+    model: str = "text-embedding-3-large"
+    dimensions: int = 3072
+
+
 class PathSettings(BaseSettings):
     input_folder: str = "./input"
     processed_folder: str = "./processed"
@@ -54,6 +83,8 @@ class Settings(BaseSettings):
     tg: TelegramSettings = None  # type: ignore[assignment]
     ai: AISettings = None  # type: ignore[assignment]
     paths: PathSettings = PathSettings()
+    database: DatabaseSettings = None  # type: ignore[assignment]
+    embedding: EmbeddingSettings = None  # type: ignore[assignment]
 
     def model_post_init(self, __context) -> None:
         if self.wp is None:
@@ -62,6 +93,16 @@ class Settings(BaseSettings):
             self.tg = TelegramSettings(_env_file=".env")
         if self.ai is None:
             self.ai = AISettings(_env_file=".env")
+        if self.database is None:
+            try:
+                self.database = DatabaseSettings(_env_file=".env")
+            except Exception:
+                self.database = DatabaseSettings()
+        if self.embedding is None:
+            try:
+                self.embedding = EmbeddingSettings(_env_file=".env")
+            except Exception:
+                self.embedding = EmbeddingSettings()
 
 
 @lru_cache(maxsize=1)

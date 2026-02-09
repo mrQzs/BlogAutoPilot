@@ -31,3 +31,19 @@ class WordPressError(BlogAutoPilotError):
 
 class TelegramError(BlogAutoPilotError):
     """Telegram 推送失败"""
+
+
+class DatabaseError(BlogAutoPilotError):
+    """数据库操作异常"""
+
+
+class EmbeddingError(BlogAutoPilotError):
+    """Embedding API 异常"""
+
+
+class TagExtractionError(BlogAutoPilotError):
+    """标签提取异常"""
+
+
+class AssociationError(BlogAutoPilotError):
+    """关联查询异常"""

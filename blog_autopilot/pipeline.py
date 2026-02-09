@@ -31,6 +31,45 @@ class Pipeline:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._writer = AIWriter(settings.ai)
+        # 关联系统组件（可选，未配置数据库时为 None）
+        self._database = None
+        self._embedding_client = None
+        self._ingestor = None
+        self._init_association_components()
+
+    def _init_association_components(self) -> None:
+        """尝试初始化关联系统组件（数据库未配置时静默跳过）"""
+        db_settings = self._settings.database
+        emb_settings = self._settings.embedding
+
+        # 检查数据库是否实际配置了有效凭据
+        if not db_settings or not db_settings.user:
+            logger.info("数据库未配置，关联系统已禁用")
+            return
+
+        try:
+            from blog_autopilot.db import Database
+            from blog_autopilot.embedding import EmbeddingClient
+            from blog_autopilot.ingest import ArticleIngestor
+
+            self._database = Database(db_settings)
+            if emb_settings and emb_settings.api_key.get_secret_value():
+                self._embedding_client = EmbeddingClient(emb_settings)
+            self._ingestor = ArticleIngestor(self._settings)
+            logger.info("关联系统组件初始化成功")
+        except Exception as e:
+            logger.warning(f"关联系统初始化失败，将使用原有模式: {e}")
+            self._database = None
+            self._embedding_client = None
+            self._ingestor = None
+
+    @property
+    def _association_enabled(self) -> bool:
+        """关联系统是否可用"""
+        return (
+            self._database is not None
+            and self._embedding_client is not None
+        )
 
     def process_file(self, task: FileTask) -> PipelineResult:
         """处理单个文件的完整流水线"""
@@ -53,16 +92,43 @@ class Pipeline:
                 filename=task.filename, success=False, error=str(e)
             )
 
-        # ② AI 生成文章
+        # ② 关联查询（如果数据库可用）
+        associations = None
+        pre_tags = None
+        pre_tg_promo = None
+        pre_embedding = None
+        if self._association_enabled:
+            try:
+                pre_tags, pre_tg_promo, _ = self._writer.extract_tags_and_promo(
+                    raw_text
+                )
+                pre_embedding = self._embedding_client.get_embedding(
+                    pre_tg_promo
+                )
+                associations = self._database.find_related_articles(
+                    tags=pre_tags,
+                    embedding=pre_embedding,
+                )
+                if associations:
+                    logger.info(
+                        f"找到 {len(associations)} 篇关联文章"
+                    )
+            except Exception as e:
+                logger.warning(f"关联查询失败，回退到原有模式: {e}")
+                associations = None
+
+        # ③ AI 生成文章（有关联时使用增强模式）
         try:
-            article = self._writer.generate_blog_post(raw_text)
+            article = self._writer.generate_blog_post_with_context(
+                raw_text, associations=associations
+            )
         except (AIAPIError, AIResponseParseError) as e:
             logger.error(f"跳过 {task.filename}: AI 生成内容失败 - {e}")
             return PipelineResult(
                 filename=task.filename, success=False, error=str(e)
             )
 
-        # ③ 发布到 WordPress
+        # ④ 发布到 WordPress
         try:
             blog_link = post_to_wordpress(
                 title=article.title,
@@ -80,7 +146,39 @@ class Pipeline:
                 error=str(e),
             )
 
-        # ④ 推广
+        # ⑤ 新文章入库（如果数据库可用）
+        if self._association_enabled and self._ingestor:
+            try:
+                from blog_autopilot.models import ArticleRecord
+                from blog_autopilot.db import Database
+
+                tags = pre_tags
+                embedding = pre_embedding
+                # 如果之前关联查询失败，这里重新提取
+                if tags is None:
+                    tags, tg_promo, _ = self._writer.extract_tags_and_promo(
+                        article.html_body
+                    )
+                    embedding = self._embedding_client.get_embedding(
+                        tg_promo
+                    )
+                else:
+                    tg_promo = pre_tg_promo
+
+                record = ArticleRecord(
+                    id=Database._generate_id(),
+                    title=article.title,
+                    tags=tags,
+                    tg_promo=tg_promo,
+                    embedding=embedding,
+                    url=blog_link,
+                )
+                self._database.insert_article(record)
+                logger.info(f"新文章已入库: {article.title}")
+            except Exception as e:
+                logger.warning(f"文章入库失败（不影响发布）: {e}")
+
+        # ⑥ 推广
         try:
             promo_text = self._writer.generate_promo(
                 article.title, article.html_body, hashtag=meta.hashtag
@@ -189,6 +287,10 @@ class Pipeline:
         logger.info(
             f"  运行模式: {'单次' if once else f'持续监控 (每 {POLL_INTERVAL}s)'}"
         )
+        if self._association_enabled:
+            logger.info("  关联系统: 已启用")
+        else:
+            logger.info("  关联系统: 未启用（数据库未配置）")
 
         if once:
             count = self.scan_and_process()
@@ -208,15 +310,26 @@ class Pipeline:
 
     def run_test(self) -> None:
         """测试所有外部连接"""
+        steps = 2
+        if self._association_enabled:
+            steps = 3
+
         print("\n连接测试\n" + "=" * 40)
 
-        print("\n[1/2] WordPress...")
+        print(f"\n[1/{steps}] WordPress...")
         wp_ok = test_wp_connection(self._settings.wp)
 
-        print("\n[2/2] Telegram...")
+        print(f"\n[2/{steps}] Telegram...")
         tg_ok = test_tg_connection(self._settings.tg)
+
+        db_ok = None
+        if self._association_enabled:
+            print(f"\n[3/{steps}] Database...")
+            db_ok = self._database.test_connection()
 
         print("\n" + "=" * 40)
         print(f"WordPress: {'OK' if wp_ok else 'FAIL'}")
         print(f"Telegram:  {'OK' if tg_ok else 'FAIL'}")
+        if db_ok is not None:
+            print(f"Database:  {'OK' if db_ok else 'FAIL'}")
         print("\nAI 模块测试请运行: python -m blog_autopilot.ai_writer <文件路径>")
