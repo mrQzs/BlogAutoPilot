@@ -2,6 +2,7 @@
 
 import base64
 import logging
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_fixed
@@ -26,6 +27,101 @@ def _build_auth_header(settings: WordPressSettings) -> dict[str, str]:
     }
 
 
+def _get_tags_url(posts_url: str) -> str:
+    """从 posts URL 推导 tags endpoint URL"""
+    parsed = urlparse(posts_url)
+    qs = parse_qs(parsed.query)
+    if "rest_route" in qs:
+        # ?rest_route=/wp/v2/posts → ?rest_route=/wp/v2/tags
+        route = qs["rest_route"][0].rsplit("/", 1)[0] + "/tags"
+        new_qs = urlencode({"rest_route": route})
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_qs}"
+    # Pretty permalink: .../wp-json/wp/v2/posts → .../wp-json/wp/v2/tags
+    return posts_url.rsplit("/", 1)[0] + "/tags"
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(3),
+    retry=retry_if_result(_is_server_error),
+    reraise=True,
+)
+def _create_or_get_wp_tag(
+    tag_name: str,
+    tags_url: str,
+    headers: dict[str, str],
+) -> int | None:
+    """
+    创建或获取 WordPress 标签 ID。
+
+    返回标签 ID，失败返回 None（不阻断流程）。
+    """
+    try:
+        resp = requests.post(
+            tags_url,
+            headers=headers,
+            json={"name": tag_name},
+            timeout=15,
+        )
+
+        if resp.status_code == 201:
+            return resp.json()["id"]
+
+        if resp.status_code == 400:
+            # term_exists: 标签已存在
+            data = resp.json()
+            term_id = data.get("data", {}).get("term_id")
+            if term_id:
+                return int(term_id)
+            # 回退：搜索标签
+            search_resp = requests.get(
+                tags_url,
+                headers=headers,
+                params={"search": tag_name, "per_page": 1},
+                timeout=10,
+            )
+            if search_resp.status_code == 200:
+                results = search_resp.json()
+                if results:
+                    return results[0]["id"]
+            return None
+
+        if resp.status_code >= 500:
+            logger.warning(f"标签创建服务器错误 ({resp.status_code}), 将重试...")
+            return None  # 触发 tenacity 重试
+
+        logger.warning(f"标签创建失败 ({resp.status_code}): {tag_name}")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"标签创建请求异常: {tag_name} - {e}")
+        return None
+
+
+def ensure_wp_tags(
+    tag_names: tuple[str, ...] | list[str],
+    settings: WordPressSettings,
+) -> list[int]:
+    """
+    批量创建/获取 WordPress 标签 ID。
+
+    跳过失败的标签，返回成功的 ID 列表。
+    """
+    tags_url = _get_tags_url(settings.url)
+    headers = _build_auth_header(settings)
+    tag_ids = []
+
+    for name in tag_names:
+        tag_id = _create_or_get_wp_tag(name, tags_url, headers)
+        if tag_id is not None:
+            tag_ids.append(tag_id)
+        else:
+            logger.warning(f"跳过标签: {name}")
+
+    logger.info(f"WordPress 标签就绪: {len(tag_ids)}/{len(tag_names)}")
+    return tag_ids
+
+
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_fixed(5),
@@ -38,6 +134,10 @@ def post_to_wordpress(
     settings: WordPressSettings,
     status: str = "publish",
     category_id: int | None = None,
+    excerpt: str | None = None,
+    slug: str | None = None,
+    tag_ids: list[int] | None = None,
+    featured_media: int | None = None,
 ) -> str:
     """
     发布文章到 WordPress。
@@ -58,6 +158,14 @@ def post_to_wordpress(
         "status": status,
         "categories": [effective_category],
     }
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if slug:
+        payload["slug"] = slug
+    if tag_ids:
+        payload["tags"] = tag_ids
+    if featured_media:
+        payload["featured_media"] = featured_media
 
     try:
         resp = requests.post(

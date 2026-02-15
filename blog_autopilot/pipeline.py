@@ -8,17 +8,28 @@ import time
 
 from blog_autopilot.ai_writer import AIWriter
 from blog_autopilot.config import Settings
-from blog_autopilot.constants import DUPLICATE_SIMILARITY_THRESHOLD, POLL_INTERVAL
+from blog_autopilot.constants import (
+    DUPLICATE_SIMILARITY_THRESHOLD,
+    POLL_INTERVAL,
+    QUALITY_MAX_REWRITE_ATTEMPTS,
+)
 from blog_autopilot.exceptions import (
     AIAPIError,
     AIResponseParseError,
+    CoverImageError,
     ExtractionError,
+    QualityReviewError,
+    SEOExtractionError,
     TelegramError,
     WordPressError,
 )
 from blog_autopilot.extractor import extract_text_from_file
 from blog_autopilot.models import FileTask, PipelineResult
-from blog_autopilot.publisher import post_to_wordpress, test_wp_connection
+from blog_autopilot.publisher import (
+    ensure_wp_tags,
+    post_to_wordpress,
+    test_wp_connection,
+)
 from blog_autopilot.scanner import scan_input_directory
 from blog_autopilot.telegram import send_to_telegram, test_tg_connection
 
@@ -31,6 +42,14 @@ class Pipeline:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._writer = AIWriter(settings.ai)
+        # 封面图生成器（可选）
+        self._cover_image_generator = None
+        if settings.ai.cover_image_enabled:
+            try:
+                from blog_autopilot.cover_image import CoverImageGenerator
+                self._cover_image_generator = CoverImageGenerator(settings.ai)
+            except Exception as e:
+                logger.warning(f"封面图生成器初始化失败: {e}")
         # 关联系统组件（可选，未配置数据库时为 None）
         self._database = None
         self._embedding_client = None
@@ -145,6 +164,82 @@ class Pipeline:
                 filename=task.filename, success=False, error=str(e)
             )
 
+        # ③.2 质量审核（失败不阻断发布）
+        if self._settings.ai.quality_review_enabled:
+            try:
+                review = self._writer.review_quality(
+                    article.title, article.html_body, raw_text,
+                )
+                if review.verdict == "draft":
+                    self._save_draft(task.filename, article.title, article.html_body)
+                    return PipelineResult(
+                        filename=task.filename, success=False, title=article.title,
+                        error=f"质量审核未通过 (综合分: {review.overall_score})",
+                    )
+
+                rewrite_count = 0
+                while review.verdict == "rewrite" and rewrite_count < QUALITY_MAX_REWRITE_ATTEMPTS:
+                    rewrite_count += 1
+                    logger.info(
+                        f"质量审核: 第 {rewrite_count}/{QUALITY_MAX_REWRITE_ATTEMPTS} 次重写"
+                    )
+                    article = self._writer.rewrite_with_feedback(
+                        article.title, article.html_body, raw_text,
+                        review, category_name=meta.category_name,
+                    )
+                    review = self._writer.review_quality(
+                        article.title, article.html_body, raw_text,
+                    )
+
+                if review.verdict == "rewrite":
+                    self._save_draft(task.filename, article.title, article.html_body)
+                    return PipelineResult(
+                        filename=task.filename, success=False, title=article.title,
+                        error=f"重写 {QUALITY_MAX_REWRITE_ATTEMPTS} 次后仍未通过 (综合分: {review.overall_score})",
+                    )
+
+                if review.verdict == "draft":
+                    self._save_draft(task.filename, article.title, article.html_body)
+                    return PipelineResult(
+                        filename=task.filename, success=False, title=article.title,
+                        error=f"重写后质量审核未通过 (综合分: {review.overall_score})",
+                    )
+
+            except (AIAPIError, AIResponseParseError, QualityReviewError) as e:
+                logger.warning(f"质量审核失败（不影响发布）: {e}")
+
+        # ③.5 SEO 元数据提取（失败不阻断发布）
+        seo = None
+        wp_tag_ids = None
+        try:
+            seo = self._writer.extract_seo_metadata(
+                article.title, article.html_body
+            )
+            if seo.wp_tags:
+                wp_tag_ids = ensure_wp_tags(seo.wp_tags, self._settings.wp)
+        except (AIAPIError, AIResponseParseError, SEOExtractionError) as e:
+            logger.warning(f"SEO 提取失败（不影响发布）: {e}")
+
+        # ③.8 封面图生成+上传（失败不阻断发布）
+        featured_media_id = None
+        if self._cover_image_generator:
+            try:
+                from blog_autopilot.cover_image import upload_media_to_wordpress
+
+                image_data = self._cover_image_generator.generate_image(
+                    article.title, article.html_body
+                )
+                slug = seo.slug if seo else task.filename.rsplit(".", 1)[0]
+                featured_media_id = upload_media_to_wordpress(
+                    image_data,
+                    f"cover-{slug}.png",
+                    self._settings.wp,
+                )
+            except CoverImageError as e:
+                logger.warning(f"封面图生成/上传失败（不影响发布）: {e}")
+            except Exception as e:
+                logger.warning(f"封面图步骤异常（不影响发布）: {e}")
+
         # ④ 发布到 WordPress
         try:
             blog_link = post_to_wordpress(
@@ -152,6 +247,10 @@ class Pipeline:
                 content=article.html_body,
                 settings=self._settings.wp,
                 category_id=meta.category_id,
+                excerpt=seo.meta_description if seo else None,
+                slug=seo.slug if seo else None,
+                tag_ids=wp_tag_ids,
+                featured_media=featured_media_id,
             )
         except WordPressError as e:
             logger.error(f"{task.filename}: WordPress 发布失败 - {e}")
@@ -321,6 +420,14 @@ class Pipeline:
             logger.info("  关联系统: 已启用")
         else:
             logger.info("  关联系统: 未启用（数据库未配置）")
+        if self._cover_image_generator:
+            logger.info("  封面图生成: 已启用")
+        else:
+            logger.info("  封面图生成: 未启用")
+        if self._settings.ai.quality_review_enabled:
+            logger.info("  质量审核: 已启用")
+        else:
+            logger.info("  质量审核: 未启用")
 
         if once:
             count = self.scan_and_process()

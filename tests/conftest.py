@@ -18,6 +18,8 @@ from blog_autopilot.models import (
     ArticleRecord,
     AssociationResult,
     CategoryMeta,
+    QualityIssue,
+    QualityReview,
     TagSet,
 )
 
@@ -94,4 +96,24 @@ def sample_association(sample_article_record):
         tag_match_count=3,
         relation_level="中关联",
         similarity=0.85,
+    )
+
+
+@pytest.fixture
+def sample_quality_review():
+    return QualityReview(
+        consistency_score=8,
+        readability_score=7,
+        ai_cliche_score=6,
+        overall_score=7,
+        verdict="pass",
+        issues=(
+            QualityIssue(
+                category="ai_cliche",
+                severity="medium",
+                description="第三段使用了套话",
+                suggestion="改用更自然的过渡语",
+            ),
+        ),
+        summary="文章整体质量良好。",
     )

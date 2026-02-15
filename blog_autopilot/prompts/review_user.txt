@@ -1,0 +1,9 @@
+原始素材预览：
+{source_preview}
+
+文章标题：{title}
+
+文章内容预览：
+{article_preview}
+
+请根据以上原始素材和生成的文章，从 consistency、readability、ai_cliche 三个维度进行评分，严格按照 JSON 格式输出。

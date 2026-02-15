@@ -13,6 +13,20 @@ from blog_autopilot.config import AISettings
 from blog_autopilot.constants import (
     AI_PROMO_PREVIEW_LIMIT,
     AI_WRITER_INPUT_LIMIT,
+    QUALITY_INPUT_PREVIEW_LIMIT,
+    QUALITY_PASS_THRESHOLD,
+    QUALITY_REQUIRED_FIELDS,
+    QUALITY_REWRITE_THRESHOLD,
+    QUALITY_WEIGHT_AI_CLICHE,
+    QUALITY_WEIGHT_CONSISTENCY,
+    QUALITY_WEIGHT_READABILITY,
+    SEO_INPUT_PREVIEW_LIMIT,
+    SEO_META_DESC_MAX_LENGTH,
+    SEO_META_DESC_MIN_LENGTH,
+    SEO_SLUG_MAX_LENGTH,
+    SEO_WP_TAG_MAX_LENGTH,
+    SEO_WP_TAGS_MAX_COUNT,
+    SEO_WP_TAGS_MIN_COUNT,
     TAG_CONTENT_MAX_LENGTH,
     TAG_MAX_LENGTH,
     TG_PROMO_MAX_LENGTH,
@@ -21,9 +35,18 @@ from blog_autopilot.constants import (
 from blog_autopilot.exceptions import (
     AIAPIError,
     AIResponseParseError,
+    QualityReviewError,
+    SEOExtractionError,
     TagExtractionError,
 )
-from blog_autopilot.models import ArticleResult, AssociationResult, TagSet
+from blog_autopilot.models import (
+    ArticleResult,
+    AssociationResult,
+    QualityIssue,
+    QualityReview,
+    SEOMetadata,
+    TagSet,
+)
 
 logger = logging.getLogger("blog-autopilot")
 
@@ -35,6 +58,9 @@ _TAGGER_REQUIRED_FIELDS = (
     "title", "tag_magazine", "tag_science",
     "tag_topic", "tag_content", "tg_promo",
 )
+
+# SEO 提取 JSON 必需字段
+_SEO_REQUIRED_FIELDS = ("meta_description", "slug", "wp_tags")
 
 
 class AIWriter:
@@ -63,6 +89,28 @@ class AIWriter:
             return filepath.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise AIAPIError(f"提示词文件不存在: {filepath}")
+
+    @staticmethod
+    def _parse_article_response(response: str) -> ArticleResult:
+        """
+        解析 AI 返回的文章响应：第一行为标题，其余为 HTML 正文。
+
+        抛出:
+            AIResponseParseError: 返回内容为空或缺少标题/正文
+        """
+        lines = [line for line in response.split("\n") if line.strip()]
+        if not lines:
+            raise AIResponseParseError("AI 返回内容为空")
+
+        title = lines[0].replace("#", "").strip()
+        title = title.replace("<h1>", "").replace("</h1>", "").strip()
+        body = "\n".join(lines[1:]).strip()
+        body = body.replace("```html", "").replace("```", "")
+
+        if not title or not body:
+            raise AIResponseParseError("AI 返回内容缺少标题或正文")
+
+        return ArticleResult(title=title, html_body=body)
 
     def _get_writer_system_prompt(
         self, category_name: str | None, context: bool = False
@@ -145,25 +193,12 @@ class AIWriter:
             max_tokens=self._settings.writer_max_tokens,
         )
 
-        lines = [line for line in response.split("\n") if line.strip()]
-        if not lines:
-            raise AIResponseParseError("AI 返回内容为空")
-
-        # 提取标题（去掉可能残留的 # 或 HTML 标签）
-        title = lines[0].replace("#", "").strip()
-        title = title.replace("<h1>", "").replace("</h1>", "").strip()
-
-        # 提取正文
-        body = "\n".join(lines[1:]).strip()
-        body = body.replace("```html", "").replace("```", "")
-
-        if not title or not body:
-            raise AIResponseParseError("AI 返回内容缺少标题或正文")
+        article = self._parse_article_response(response)
 
         logger.info(
-            f"文章生成完成 | 标题: {title} | 正文长度: {len(body)} 字符"
+            f"文章生成完成 | 标题: {article.title} | 正文长度: {len(article.html_body)} 字符"
         )
-        return ArticleResult(title=title, html_body=body)
+        return article
 
     def generate_blog_post_with_context(
         self,
@@ -203,22 +238,13 @@ class AIWriter:
             max_tokens=self._settings.writer_max_tokens,
         )
 
-        lines = [line for line in response.split("\n") if line.strip()]
-        if not lines:
-            raise AIResponseParseError("AI 返回内容为空")
-
-        title = lines[0].replace("#", "").strip()
-        title = title.replace("<h1>", "").replace("</h1>", "").strip()
-        body = "\n".join(lines[1:]).strip()
-        body = body.replace("```html", "").replace("```", "")
-
-        if not title or not body:
-            raise AIResponseParseError("AI 返回内容缺少标题或正文")
+        article = self._parse_article_response(response)
 
         logger.info(
-            f"增强文章生成完成 | 标题: {title} | 正文长度: {len(body)} 字符"
+            f"增强文章生成完成 | 标题: {article.title} | 正文长度: {len(article.html_body)} 字符"
         )
-        return ArticleResult(title=title, html_body=body)
+        _log_link_coverage(article.html_body, associations)
+        return article
 
     def generate_promo(
         self,
@@ -252,6 +278,125 @@ class AIWriter:
             promo_text = f"{promo_text}\n\n{hashtag}"
 
         return promo_text
+
+    # ── SEO 元数据提取 ──
+
+    def extract_seo_metadata(self, title: str, html_body: str) -> SEOMetadata:
+        """
+        调用 AI 提取 SEO 元数据（meta description / slug / wp_tags）。
+
+        抛出:
+            AIAPIError: API 调用失败
+            AIResponseParseError: JSON 解析失败
+            SEOExtractionError: 验证失败
+        """
+        logger.info(f"[SEO] 正在提取 SEO 元数据... (标题: {title})")
+
+        system_prompt = self._load_prompt("seo_system.txt")
+        user_template = self._load_prompt("seo_user.txt")
+        user_prompt = user_template.format(
+            title=title,
+            content_preview=html_body[:SEO_INPUT_PREVIEW_LIMIT],
+        )
+
+        response = self.call_claude(
+            prompt=user_prompt,
+            system=system_prompt,
+            model=self._settings.model_promo,
+            max_tokens=self._settings.promo_max_tokens,
+        )
+
+        data = _parse_seo_response(response)
+        seo = _validate_seo_metadata(data)
+
+        logger.info(
+            f"SEO 提取完成 | slug: {seo.slug} | "
+            f"tags: {', '.join(seo.wp_tags)}"
+        )
+        return seo
+
+    # ── 质量审核 ──
+
+    def review_quality(
+        self, title: str, html_body: str, source_text: str,
+    ) -> QualityReview:
+        """
+        调用 AI 对生成的文章进行质量审核。
+
+        抛出:
+            AIAPIError: API 调用失败
+            AIResponseParseError: JSON 解析失败
+            QualityReviewError: 审核验证失败
+        """
+        logger.info(f"[Review] 正在审核文章质量... (标题: {title})")
+
+        system_prompt = self._load_prompt("review_system.txt")
+        user_template = self._load_prompt("review_user.txt")
+        user_prompt = user_template.format(
+            source_preview=source_text[:QUALITY_INPUT_PREVIEW_LIMIT],
+            title=title,
+            article_preview=html_body[:QUALITY_INPUT_PREVIEW_LIMIT],
+        )
+
+        model = self._settings.model_reviewer or self._settings.model_promo
+        response = self.call_claude(
+            prompt=user_prompt,
+            system=system_prompt,
+            model=model,
+            max_tokens=self._settings.reviewer_max_tokens,
+        )
+
+        data = _parse_review_response(response)
+        review = _validate_review(data)
+
+        logger.info(
+            f"审核完成 | 一致性: {review.consistency_score} | "
+            f"可读性: {review.readability_score} | "
+            f"AI痕迹: {review.ai_cliche_score} | "
+            f"综合: {review.overall_score} | 判定: {review.verdict}"
+        )
+        return review
+
+    def rewrite_with_feedback(
+        self,
+        title: str,
+        html_body: str,
+        source_text: str,
+        review: QualityReview,
+        category_name: str | None = None,
+    ) -> ArticleResult:
+        """
+        根据审核反馈重写文章。
+
+        抛出:
+            AIAPIError: API 调用失败
+            AIResponseParseError: 返回内容解析失败
+        """
+        logger.info(f"[Rewrite] 正在根据审核反馈重写文章... (标题: {title})")
+
+        system_prompt = self._get_writer_system_prompt(category_name)
+        user_template = self._load_prompt("rewrite_feedback_user.txt")
+        user_prompt = user_template.format(
+            review_summary=review.summary,
+            issues_text=format_issues_for_rewrite(review.issues),
+            source_preview=source_text[:QUALITY_INPUT_PREVIEW_LIMIT],
+            title=title,
+            article_body=html_body[:AI_WRITER_INPUT_LIMIT],
+        )
+
+        response = self.call_claude(
+            prompt=user_prompt,
+            system=system_prompt,
+            model=self._settings.model_writer,
+            max_tokens=self._settings.writer_max_tokens,
+        )
+
+        article = self._parse_article_response(response)
+
+        logger.info(
+            f"重写完成 | 标题: {article.title} | 正文长度: {len(article.html_body)} 字符"
+        )
+        return article
 
     # ── 标签提取 (Task 11) ──
 
@@ -311,12 +456,16 @@ class AIWriter:
         return tags, tg_promo, data["title"]
 
 
-# ── 标签提取 JSON 解析 (Task 13) ──
+# ── 通用 JSON 解析 ──
 
 
-def _parse_tagger_response(response_text: str) -> dict:
+def _parse_json_response(
+    response_text: str,
+    validate_fn,
+    error_prefix: str,
+) -> dict:
     """
-    健壮的 JSON 解析：处理 AI 返回的各种格式变体。
+    通用 JSON 解析：处理 AI 返回的各种格式变体。
 
     尝试顺序：
     1. 直接解析
@@ -331,7 +480,7 @@ def _parse_tagger_response(response_text: str) -> dict:
     # 尝试 1: 直接解析
     try:
         data = json.loads(text)
-        _validate_tagger_fields(data)
+        validate_fn(data)
         return data
     except json.JSONDecodeError:
         pass
@@ -341,7 +490,7 @@ def _parse_tagger_response(response_text: str) -> dict:
     if code_block:
         try:
             data = json.loads(code_block.group(1).strip())
-            _validate_tagger_fields(data)
+            validate_fn(data)
             return data
         except json.JSONDecodeError:
             pass
@@ -352,14 +501,25 @@ def _parse_tagger_response(response_text: str) -> dict:
     if first_brace != -1 and last_brace > first_brace:
         try:
             data = json.loads(text[first_brace:last_brace + 1])
-            _validate_tagger_fields(data)
+            validate_fn(data)
             return data
         except json.JSONDecodeError:
             pass
 
     raise AIResponseParseError(
-        f"无法从 AI 响应中解析 JSON。响应内容前 200 字符: "
+        f"{error_prefix}。响应内容前 200 字符: "
         f"{text[:200]}"
+    )
+
+
+# ── 标签提取 JSON 解析 (Task 13) ──
+
+
+def _parse_tagger_response(response_text: str) -> dict:
+    """解析标签提取 AI 响应 JSON"""
+    return _parse_json_response(
+        response_text, _validate_tagger_fields,
+        "无法从 AI 响应中解析 JSON",
     )
 
 
@@ -370,6 +530,170 @@ def _validate_tagger_fields(data: dict) -> None:
         raise AIResponseParseError(
             f"AI 响应缺少必需字段: {', '.join(missing)}"
         )
+
+
+# ── SEO 响应解析与验证 ──
+
+
+def _parse_seo_response(response_text: str) -> dict:
+    """解析 SEO AI 响应 JSON"""
+    return _parse_json_response(
+        response_text, _validate_seo_fields,
+        "无法从 SEO 响应中解析 JSON",
+    )
+
+
+def _validate_seo_fields(data: dict) -> None:
+    """验证 SEO 响应包含所有必需字段"""
+    missing = [f for f in _SEO_REQUIRED_FIELDS if f not in data]
+    if missing:
+        raise AIResponseParseError(
+            f"SEO 响应缺少必需字段: {', '.join(missing)}"
+        )
+
+
+def _validate_seo_metadata(data: dict) -> SEOMetadata:
+    """
+    验证并规范化 SEO 元数据。
+
+    抛出:
+        SEOExtractionError: 验证失败
+    """
+    # meta_description
+    desc = str(data.get("meta_description", "")).strip()
+    if not desc:
+        raise SEOExtractionError("meta_description 不能为空")
+    if len(desc) < SEO_META_DESC_MIN_LENGTH:
+        logger.warning(
+            f"meta_description 偏短: {len(desc)} 字符 "
+            f"(建议 {SEO_META_DESC_MIN_LENGTH}-{SEO_META_DESC_MAX_LENGTH})"
+        )
+    if len(desc) > SEO_META_DESC_MAX_LENGTH:
+        desc = desc[:SEO_META_DESC_MAX_LENGTH]
+
+    # slug
+    slug = str(data.get("slug", "")).strip().lower()
+    slug = re.sub(r"[^a-z0-9-]", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    slug = slug.strip("-")
+    if not slug:
+        raise SEOExtractionError("slug 规范化后为空")
+    if len(slug) > SEO_SLUG_MAX_LENGTH:
+        slug = slug[:SEO_SLUG_MAX_LENGTH].rstrip("-")
+
+    # wp_tags
+    raw_tags = data.get("wp_tags")
+    if not isinstance(raw_tags, list):
+        raise SEOExtractionError("wp_tags 必须是数组")
+    tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+    tags = [t[:SEO_WP_TAG_MAX_LENGTH] for t in tags]
+    if len(tags) < SEO_WP_TAGS_MIN_COUNT:
+        raise SEOExtractionError(
+            f"wp_tags 数量不足: {len(tags)} < {SEO_WP_TAGS_MIN_COUNT}"
+        )
+    tags = tags[:SEO_WP_TAGS_MAX_COUNT]
+
+    return SEOMetadata(
+        meta_description=desc,
+        slug=slug,
+        wp_tags=tuple(tags),
+    )
+
+
+# ── 质量审核 JSON 解析与验证 ──
+
+
+def _parse_review_response(response_text: str) -> dict:
+    """解析质量审核 AI 响应 JSON"""
+    return _parse_json_response(
+        response_text, _validate_review_fields,
+        "无法从审核响应中解析 JSON",
+    )
+
+
+def _validate_review_fields(data: dict) -> None:
+    """验证审核响应包含所有必需字段"""
+    missing = [f for f in QUALITY_REQUIRED_FIELDS if f not in data]
+    if missing:
+        raise AIResponseParseError(
+            f"审核响应缺少必需字段: {', '.join(missing)}"
+        )
+
+
+def _validate_review(data: dict) -> QualityReview:
+    """
+    验证并构建 QualityReview 对象。
+
+    - 分数 clamp 到 1-10（容错，不抛异常）
+    - Python 端重算 overall_score（LLM 算术不可靠）
+    - 根据阈值推导 verdict
+
+    抛出:
+        QualityReviewError: 分数不是整数
+    """
+    def _clamp_score(value, field_name: str) -> int:
+        try:
+            score = int(float(value))
+        except (TypeError, ValueError):
+            raise QualityReviewError(
+                f"{field_name} 必须是整数，实际值: {value!r}"
+            )
+        return max(1, min(10, score))
+
+    consistency = _clamp_score(data["consistency"], "consistency")
+    readability = _clamp_score(data["readability"], "readability")
+    ai_cliche = _clamp_score(data["ai_cliche"], "ai_cliche")
+
+    overall = round(
+        consistency * QUALITY_WEIGHT_CONSISTENCY
+        + readability * QUALITY_WEIGHT_READABILITY
+        + ai_cliche * QUALITY_WEIGHT_AI_CLICHE
+    )
+
+    if overall >= QUALITY_PASS_THRESHOLD:
+        verdict = "pass"
+    elif overall >= QUALITY_REWRITE_THRESHOLD:
+        verdict = "rewrite"
+    else:
+        verdict = "draft"
+
+    # 解析 issues
+    raw_issues = data.get("issues", [])
+    issues = []
+    if isinstance(raw_issues, list):
+        for item in raw_issues:
+            if isinstance(item, dict):
+                issues.append(QualityIssue(
+                    category=str(item.get("category", "")),
+                    severity=str(item.get("severity", "medium")),
+                    description=str(item.get("description", "")),
+                    suggestion=str(item.get("suggestion", "")),
+                ))
+
+    summary = str(data.get("summary", ""))[:200]
+
+    return QualityReview(
+        consistency_score=consistency,
+        readability_score=readability,
+        ai_cliche_score=ai_cliche,
+        overall_score=overall,
+        verdict=verdict,
+        issues=tuple(issues),
+        summary=summary,
+    )
+
+
+def format_issues_for_rewrite(issues: tuple[QualityIssue, ...]) -> str:
+    """将问题列表格式化为重写提示文本"""
+    if not issues:
+        return "无具体问题记录。"
+    lines = []
+    for i, issue in enumerate(issues, 1):
+        lines.append(
+            f"{i}. [{issue.severity}] {issue.category}: "
+            f"{issue.description}\n   建议: {issue.suggestion}"
+        )
+    return "\n".join(lines)
 
 
 # ── 标签验证与规范化 (Task 12) ──
@@ -440,9 +764,11 @@ def build_relation_context(
         if level in groups:
             entry = (
                 f"  {len(groups[level]) + 1}. "
-                f"《{assoc.article.title}》\n"
-                f"     {assoc.article.tg_promo}"
+                f"《{assoc.article.title}》"
             )
+            if assoc.article.url:
+                entry += f"\n     链接: {assoc.article.url}"
+            entry += f"\n     {assoc.article.tg_promo}"
             groups[level].append(entry)
 
     return {
@@ -450,3 +776,17 @@ def build_relation_context(
         "medium_relations": "\n".join(groups["中关联"]) if groups["中关联"] else "",
         "weak_relations": "\n".join(groups["弱关联"]) if groups["弱关联"] else "",
     }
+
+
+def _log_link_coverage(
+    html_body: str,
+    associations: list[AssociationResult],
+) -> None:
+    """检查生成的 HTML 中内链覆盖率并记录日志"""
+    linkable = [a for a in associations if a.article.url]
+    if not linkable:
+        return
+    linked = sum(1 for a in linkable if a.article.url in html_body)
+    logger.info(f"内链覆盖: {linked}/{len(linkable)} 篇关联文章已生成内链")
+    if linked == 0 and len(linkable) >= 2:
+        logger.warning("AI 未生成任何内链，可能需要调整提示词")

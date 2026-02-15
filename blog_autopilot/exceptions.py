@@ -47,3 +47,15 @@ class TagExtractionError(BlogAutoPilotError):
 
 class AssociationError(BlogAutoPilotError):
     """关联查询异常"""
+
+
+class SEOExtractionError(BlogAutoPilotError):
+    """SEO 元数据提取异常"""
+
+
+class CoverImageError(BlogAutoPilotError):
+    """封面图生成或上传异常"""
+
+
+class QualityReviewError(BlogAutoPilotError):
+    """质量审核异常"""

@@ -1,0 +1,6 @@
+文章标题：{title}
+
+文章内容预览：
+{content_preview}
+
+请根据以上内容提取 SEO 元数据，严格按照 JSON 格式输出。

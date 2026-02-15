@@ -27,11 +27,19 @@ class AISettings(BaseSettings):
 
     api_key: SecretStr
     api_base: str = "https://api.ikuncode.cc/v1"
-    model_writer: str = "claude-opus-4-5-20251101"
+    model_writer: str = "claude-opus-4-6"
     model_promo: str = "claude-haiku-4-5-20251001"
     writer_max_tokens: int = 200_000
     promo_max_tokens: int = 10_000
     default_headers: dict[str, str] = {"User-Agent": "MyBlogWriter/1.0"}
+    model_cover_image: str = "dall-e-3"
+    cover_image_max_tokens: int = 4096
+    cover_image_enabled: bool = True
+    cover_image_api_key: SecretStr | None = None
+    cover_image_api_base: str = "https://api.dwyu.top/v1"
+    quality_review_enabled: bool = True
+    model_reviewer: str = ""
+    reviewer_max_tokens: int = 4096
 
 
 class DatabaseSettings(BaseSettings):

@@ -1,6 +1,7 @@
 """测试标签提取与验证"""
 
 import json
+import logging
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from blog_autopilot.ai_writer import (
     AIWriter,
     _parse_tagger_response,
+    _log_link_coverage,
     normalize_tag,
     validate_tags,
     build_relation_context,
@@ -226,3 +228,160 @@ class TestBuildRelationContext:
         assert context["strong_relations"] == ""
         assert "中关联文章" in context["medium_relations"]
         assert context["weak_relations"] == ""
+
+    def test_context_includes_url(self):
+        """有 URL 时上下文包含「链接:」行"""
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="有链接的文章",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广文案",
+                url="https://blog.example.com/post-1",
+            ),
+            tag_match_count=4,
+            relation_level="强关联",
+            similarity=0.9,
+        )]
+
+        context = build_relation_context(articles)
+        assert "链接: https://blog.example.com/post-1" in context["strong_relations"]
+        assert "有链接的文章" in context["strong_relations"]
+
+    def test_context_omits_url_when_none(self):
+        """URL 为 None 时不出现「链接:」行"""
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="无链接文章",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广文案",
+                url=None,
+            ),
+            tag_match_count=4,
+            relation_level="强关联",
+            similarity=0.9,
+        )]
+
+        context = build_relation_context(articles)
+        assert "链接:" not in context["strong_relations"]
+        assert "无链接文章" in context["strong_relations"]
+
+    def test_context_mixed_url(self):
+        """混合场景：一篇有 URL，一篇无 URL"""
+        articles = [
+            AssociationResult(
+                article=ArticleRecord(
+                    id="art-1",
+                    title="有链接",
+                    tags=TagSet("周刊", "AI", "测试", "内容"),
+                    tg_promo="推广1",
+                    url="https://blog.example.com/post-1",
+                ),
+                tag_match_count=4,
+                relation_level="强关联",
+                similarity=0.9,
+            ),
+            AssociationResult(
+                article=ArticleRecord(
+                    id="art-2",
+                    title="无链接",
+                    tags=TagSet("周刊", "AI", "测试", "内容"),
+                    tg_promo="推广2",
+                    url=None,
+                ),
+                tag_match_count=4,
+                relation_level="强关联",
+                similarity=0.85,
+            ),
+        ]
+
+        context = build_relation_context(articles)
+        text = context["strong_relations"]
+        assert "链接: https://blog.example.com/post-1" in text
+        assert "有链接" in text
+        assert "无链接" in text
+        # 第二篇无 URL，不应出现第二个「链接:」
+        assert text.count("链接:") == 1
+
+
+class TestLogLinkCoverage:
+
+    def test_logs_coverage_count(self, caplog):
+        """验证有内链时记录覆盖数"""
+        associations = [
+            AssociationResult(
+                article=ArticleRecord(
+                    id="art-1",
+                    title="文章A",
+                    tags=TagSet("周刊", "AI", "测试", "内容"),
+                    tg_promo="推广",
+                    url="https://blog.example.com/a",
+                ),
+                tag_match_count=4,
+                relation_level="强关联",
+                similarity=0.9,
+            ),
+            AssociationResult(
+                article=ArticleRecord(
+                    id="art-2",
+                    title="文章B",
+                    tags=TagSet("周刊", "AI", "测试", "内容"),
+                    tg_promo="推广",
+                    url="https://blog.example.com/b",
+                ),
+                tag_match_count=3,
+                relation_level="中关联",
+                similarity=0.8,
+            ),
+        ]
+        html = '<p>参见<a href="https://blog.example.com/a">《文章A》</a></p>'
+
+        with caplog.at_level(logging.INFO, logger="blog-autopilot"):
+            _log_link_coverage(html, associations)
+
+        assert "内链覆盖: 1/2" in caplog.text
+
+    def test_warns_when_no_links_generated(self, caplog):
+        """有 >=2 篇可链接文章但 AI 未生成任何内链时发出警告"""
+        associations = [
+            AssociationResult(
+                article=ArticleRecord(
+                    id=f"art-{i}",
+                    title=f"文章{i}",
+                    tags=TagSet("周刊", "AI", "测试", "内容"),
+                    tg_promo="推广",
+                    url=f"https://blog.example.com/{i}",
+                ),
+                tag_match_count=3,
+                relation_level="中关联",
+                similarity=0.8,
+            )
+            for i in range(3)
+        ]
+        html = "<p>没有任何内链的文章</p>"
+
+        with caplog.at_level(logging.WARNING, logger="blog-autopilot"):
+            _log_link_coverage(html, associations)
+
+        assert "AI 未生成任何内链" in caplog.text
+
+    def test_skips_when_no_linkable(self, caplog):
+        """所有文章都没有 URL 时不输出日志"""
+        associations = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="无链接",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广",
+                url=None,
+            ),
+            tag_match_count=3,
+            relation_level="中关联",
+            similarity=0.8,
+        )]
+
+        with caplog.at_level(logging.DEBUG, logger="blog-autopilot"):
+            _log_link_coverage("<p>内容</p>", associations)
+
+        assert "内链覆盖" not in caplog.text

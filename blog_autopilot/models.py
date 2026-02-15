@@ -29,6 +29,35 @@ class ArticleResult:
 
 
 @dataclass(frozen=True)
+class SEOMetadata:
+    """SEO 元数据"""
+    meta_description: str  # 120-160 字符，用作 WordPress excerpt
+    slug: str              # 纯英文小写 + 连字符，URL 友好
+    wp_tags: tuple[str, ...]  # WordPress 标签关键词
+
+
+@dataclass(frozen=True)
+class QualityIssue:
+    """审核发现的单个问题"""
+    category: str        # "consistency" | "readability" | "ai_cliche"
+    severity: str        # "high" | "medium" | "low"
+    description: str
+    suggestion: str
+
+
+@dataclass(frozen=True)
+class QualityReview:
+    """质量审核结果"""
+    consistency_score: int     # 1-10
+    readability_score: int     # 1-10
+    ai_cliche_score: int       # 1-10
+    overall_score: int         # 加权计算
+    verdict: str               # "pass" | "rewrite" | "draft"
+    issues: tuple[QualityIssue, ...]
+    summary: str
+
+
+@dataclass(frozen=True)
 class PipelineResult:
     """单个文件的流水线处理结果"""
     filename: str

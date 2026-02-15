@@ -13,6 +13,9 @@
 - **分类提示词** — 五大内容类型（Articles / Books / Magazine / News / Paper）各有专属写作风格
 - **文章关联** — 基于 pgvector 向量检索 + 四级标签匹配，自动引用站内相关文章
 - **内容去重** — Embedding 相似度检测，防止重复发布
+- **质量审核** — 三维度自动评分（一致性 / 可读性 / AI 痕迹），未达标自动重写或存草稿
+- **SEO 优化** — 自动提取 meta description、slug、WordPress 标签
+- **封面图生成** — AI 生成文章封面图并上传到 WordPress
 - **WordPress 发布** — 通过 REST API 发布文章，按目录结构自动归类
 - **Telegram 推送** — AI 生成推广文案，自动推送到 Telegram 频道
 - **Telegram Bot 收件** — 通过 Telegram Bot 远程上传文件到对应分类目录
@@ -29,6 +32,8 @@
   → 内容去重检查
   → 关联文章查询
   → AIWriter 生成博客文章 (Opus, 按大类选择提示词)
+  → 质量审核 (三维度评分 → pass / rewrite / draft)
+  → SEO 元数据提取 + 封面图生成
   → publisher 发布到 WordPress (按目录中的分类 ID)
   → AIWriter 生成推广文案 (Haiku)
   → telegram 推送到频道
@@ -48,7 +53,8 @@ BlogAutoPilot/
 │   ├── constants.py         # 命名常量
 │   ├── pipeline.py          # Pipeline 主流水线编排
 │   ├── scanner.py           # 目录扫描 + 路径解析
-│   ├── ai_writer.py         # AI 写作 (文章生成 / 推广文案 / 标签提取)
+│   ├── ai_writer.py         # AI 写作 (文章生成 / 推广文案 / 标签提取 / 质量审核)
+│   ├── cover_image.py       # 封面图生成 + WordPress 上传
 │   ├── publisher.py         # WordPress REST API 发布
 │   ├── telegram.py          # Telegram Bot API 推送
 │   ├── extractor.py         # 文本提取 (PDF / MD / TXT)
@@ -65,7 +71,9 @@ BlogAutoPilot/
 │       ├── writer_context_system_*.txt        # 带关联引用的版本
 │       ├── writer_user.txt                    # 用户提示词
 │       ├── promo_system.txt / promo_user.txt  # 推广文案提示词
-│       └── tagger_system.txt / tagger_user.txt # 标签提取提示词
+│       ├── tagger_system.txt / tagger_user.txt # 标签提取提示词
+│       ├── seo_system.txt / seo_user.txt      # SEO 元数据提取提示词
+│       └── review_system.txt / review_user.txt / rewrite_feedback_user.txt # 质量审核提示词
 ├── file_bot.py              # Telegram Bot 文件接收 (独立进程)
 ├── categories.json          # 分类配置 + Bot 配置
 ├── tests/                   # 测试
@@ -129,6 +137,11 @@ AI_MODEL_WRITER=claude-opus-4-5-20251101
 AI_MODEL_PROMO=claude-haiku-4-5-20251001
 AI_WRITER_MAX_TOKENS=200000
 AI_PROMO_MAX_TOKENS=10000
+
+# 质量审核配置 (可选，默认启用)
+AI_QUALITY_REVIEW_ENABLED=true
+AI_MODEL_REVIEWER=              # 空则回退到 AI_MODEL_PROMO
+AI_REVIEWER_MAX_TOKENS=4096
 
 # 数据库配置 (可选，不配置则关联系统禁用)
 DB_HOST=localhost
@@ -328,6 +341,7 @@ AI 会根据文件所在的大类目录自动选择对应的写作提示词。�
 | 组件 / Component | 重试次数 / Retries | 策略 / Strategy |
 |---|---|---|
 | AI API | 3 次 | 指数退避 (2s ~ 30s) |
+| 质量审核 | 最多 2 次重写 | 未通过存草稿，异常降级发布 |
 | WordPress | 2 次 | 固定 5s (仅 5xx 错误) |
 | Telegram | HTML → 纯文本降级 | 解析失败时自动降级 |
 
@@ -342,6 +356,7 @@ pytest tests/ -v
 # 运行特定模块测试
 pytest tests/test_pipeline.py -v
 pytest tests/test_ai_writer.py -v
+pytest tests/test_quality_review.py -v
 ```
 
 ---
