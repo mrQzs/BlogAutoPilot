@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class WordPressSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="WP_")
+    model_config = SettingsConfigDict(env_prefix="WP_", extra="ignore")
 
     url: str = "https://wo.city/index.php?rest_route=/wp/v2/posts"
     user: str
@@ -16,14 +16,14 @@ class WordPressSettings(BaseSettings):
 
 
 class TelegramSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TG_")
+    model_config = SettingsConfigDict(env_prefix="TG_", extra="ignore")
 
     bot_token: SecretStr
     channel_id: str = "@gooddayupday"
 
 
 class AISettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AI_")
+    model_config = SettingsConfigDict(env_prefix="AI_", extra="ignore")
 
     api_key: SecretStr
     api_base: str = "https://api.ikuncode.cc/v1"
@@ -36,7 +36,7 @@ class AISettings(BaseSettings):
 
 class DatabaseSettings(BaseSettings):
     """PostgreSQL 连接配置"""
-    model_config = SettingsConfigDict(env_prefix="DB_")
+    model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")
 
     url: SecretStr | None = None
     host: str = "localhost"
@@ -57,7 +57,7 @@ class DatabaseSettings(BaseSettings):
 
 class EmbeddingSettings(BaseSettings):
     """OpenAI Embedding API 配置"""
-    model_config = SettingsConfigDict(env_prefix="EMBEDDING_")
+    model_config = SettingsConfigDict(env_prefix="EMBEDDING_", extra="ignore")
 
     api_key: SecretStr = SecretStr("")
     api_base: str = "https://api.openai.com/v1"
@@ -71,36 +71,35 @@ class PathSettings(BaseSettings):
     drafts_folder: str = "./drafts"
 
 
-class Settings(BaseSettings):
+class Settings:
     """顶层配置，聚合所有子配置"""
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
 
-    wp: WordPressSettings = None  # type: ignore[assignment]
-    tg: TelegramSettings = None  # type: ignore[assignment]
-    ai: AISettings = None  # type: ignore[assignment]
-    paths: PathSettings = PathSettings()
-    database: DatabaseSettings = None  # type: ignore[assignment]
-    embedding: EmbeddingSettings = None  # type: ignore[assignment]
-
-    def model_post_init(self, __context) -> None:
-        if self.wp is None:
-            self.wp = WordPressSettings(_env_file=".env")
-        if self.tg is None:
-            self.tg = TelegramSettings(_env_file=".env")
-        if self.ai is None:
-            self.ai = AISettings(_env_file=".env")
-        if self.database is None:
+    def __init__(
+        self,
+        wp: WordPressSettings | None = None,
+        tg: TelegramSettings | None = None,
+        ai: AISettings | None = None,
+        paths: PathSettings | None = None,
+        database: DatabaseSettings | None = None,
+        embedding: EmbeddingSettings | None = None,
+    ) -> None:
+        _env = ".env"
+        self.wp = wp or WordPressSettings(_env_file=_env)
+        self.tg = tg or TelegramSettings(_env_file=_env)
+        self.ai = ai or AISettings(_env_file=_env)
+        self.paths = paths or PathSettings()
+        if database is not None:
+            self.database = database
+        else:
             try:
-                self.database = DatabaseSettings(_env_file=".env")
+                self.database = DatabaseSettings(_env_file=_env)
             except Exception:
                 self.database = DatabaseSettings()
-        if self.embedding is None:
+        if embedding is not None:
+            self.embedding = embedding
+        else:
             try:
-                self.embedding = EmbeddingSettings(_env_file=".env")
+                self.embedding = EmbeddingSettings(_env_file=_env)
             except Exception:
                 self.embedding = EmbeddingSettings()
 

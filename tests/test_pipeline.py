@@ -140,6 +140,7 @@ class TestPipelineNoDatabase:
         pipeline._writer.generate_blog_post_with_context.assert_called_once()
         call_args = pipeline._writer.generate_blog_post_with_context.call_args
         assert call_args.kwargs.get("associations") is None
+        assert call_args.kwargs.get("category_name") == "Magazine"
 
 
 class TestPipelineWithDatabase:
@@ -170,6 +171,7 @@ class TestPipelineWithDatabase:
         mock_db = MagicMock()
         mock_emb = MagicMock()
         mock_emb.get_embedding.return_value = [0.1] * 3072
+        mock_db.find_duplicate.return_value = None
         mock_db.find_related_articles.return_value = [
             AssociationResult(
                 article=ArticleRecord(
@@ -195,6 +197,7 @@ class TestPipelineWithDatabase:
         # 确认使用了增强生成
         call_args = pipeline._writer.generate_blog_post_with_context.call_args
         assert call_args.kwargs.get("associations") is not None
+        assert call_args.kwargs.get("category_name") == "Magazine"
 
     @patch("blog_autopilot.pipeline.send_to_telegram")
     @patch("blog_autopilot.pipeline.post_to_wordpress")
@@ -252,6 +255,7 @@ class TestPipelineWithDatabase:
         mock_db = MagicMock()
         mock_emb = MagicMock()
         mock_emb.get_embedding.return_value = [0.1] * 3072
+        mock_db.find_duplicate.return_value = None
         mock_db.find_related_articles.return_value = []
         mock_db.insert_article.side_effect = Exception("入库失败")
 

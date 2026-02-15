@@ -1,14 +1,14 @@
 """主流水线模块 — Pipeline 类"""
 
+import json
 import logging
 import os
-import re
 import shutil
 import time
 
 from blog_autopilot.ai_writer import AIWriter
 from blog_autopilot.config import Settings
-from blog_autopilot.constants import MAX_FILENAME_LENGTH, POLL_INTERVAL
+from blog_autopilot.constants import DUPLICATE_SIMILARITY_THRESHOLD, POLL_INTERVAL
 from blog_autopilot.exceptions import (
     AIAPIError,
     AIResponseParseError,
@@ -105,6 +105,22 @@ class Pipeline:
                 pre_embedding = self._embedding_client.get_embedding(
                     pre_tg_promo
                 )
+
+                # 内容去重：检查数据库中是否已有高度相似的文章
+                dup = self._database.find_duplicate(
+                    pre_embedding, DUPLICATE_SIMILARITY_THRESHOLD
+                )
+                if dup:
+                    logger.info(
+                        f"跳过重复内容: {task.filename} "
+                        f"(与《{dup['title']}》相似度 {dup['similarity']:.2%})"
+                    )
+                    return PipelineResult(
+                        filename=task.filename,
+                        success=False,
+                        error=f"内容重复: {dup['title']}",
+                    )
+
                 associations = self._database.find_related_articles(
                     tags=pre_tags,
                     embedding=pre_embedding,
@@ -120,7 +136,8 @@ class Pipeline:
         # ③ AI 生成文章（有关联时使用增强模式）
         try:
             article = self._writer.generate_blog_post_with_context(
-                raw_text, associations=associations
+                raw_text, associations=associations,
+                category_name=meta.category_name,
             )
         except (AIAPIError, AIResponseParseError) as e:
             logger.error(f"跳过 {task.filename}: AI 生成内容失败 - {e}")
@@ -206,43 +223,22 @@ class Pipeline:
 
         logger.info(f"草稿已保存到: {draft_path}")
 
-    @staticmethod
-    def _sanitize_filename(name: str) -> str:
-        """清理文件名，移除非法字符"""
-        cleaned = re.sub(r'[\\/*?:"<>|]', "", name).strip()
-        return cleaned[:MAX_FILENAME_LENGTH]
-
-    def _archive_file(
-        self,
-        filepath: str,
-        original_filename: str,
-        article_title: str | None = None,
-    ) -> None:
-        """归档文件：如果有标题，就重命名为 [标题.后缀]"""
+    def _get_archive_path(self, filepath: str) -> str:
+        """根据 input 中的相对路径，计算 processed 中的对应路径"""
+        input_folder = self._settings.paths.input_folder
         processed_dir = self._settings.paths.processed_folder
-        os.makedirs(processed_dir, exist_ok=True)
+        rel_path = os.path.relpath(filepath, input_folder)
+        return os.path.join(processed_dir, rel_path)
 
-        _, ext = os.path.splitext(original_filename)
+    def _archive_file(self, filepath: str) -> None:
+        """归档文件：保持原目录结构和原文件名"""
+        dest = self._get_archive_path(filepath)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-        if article_title:
-            safe_title = self._sanitize_filename(article_title)
-            new_name = f"{safe_title}{ext}"
-        else:
-            timestamp = int(time.time())
-            new_name = f"{timestamp}_{original_filename}"
-
-        dest = os.path.join(processed_dir, new_name)
-
-        # 防止重名覆盖
-        if os.path.exists(dest):
-            timestamp = int(time.time())
-            base = safe_title if article_title else original_filename
-            new_name = f"{base}_{timestamp}{ext}"
-            dest = os.path.join(processed_dir, new_name)
-
+        # 同名文件直接覆盖
         try:
             shutil.move(filepath, dest)
-            logger.info(f"已归档: {new_name}")
+            logger.info(f"已归档: {os.path.relpath(dest, self._settings.paths.processed_folder)}")
         except Exception as e:
             logger.error(f"归档失败: {e}")
 
@@ -260,26 +256,60 @@ class Pipeline:
         processed = 0
 
         for task in sorted(file_list, key=lambda t: t.filepath):
+            # 检查 processed 中是否已有同名文件（重复投递）
+            archive_path = self._get_archive_path(task.filepath)
+            if os.path.exists(archive_path):
+                logger.info(
+                    f"跳过重复文件: {task.filename}（已处理过，直接删除）"
+                )
+                os.remove(task.filepath)
+                continue
+
             try:
                 result = self.process_file(task)
                 if result.success:
                     processed += 1
-                self._archive_file(
-                    task.filepath, task.filename, result.title
-                )
+                    self._archive_file(task.filepath)
+                elif result.error and result.error.startswith("内容重复"):
+                    # 内容重复：直接删除源文件
+                    os.remove(task.filepath)
+                else:
+                    self._archive_file(task.filepath)
             except Exception as e:
                 logger.error(
                     f"处理 {task.filename} 时发生异常: {e}", exc_info=True
                 )
-                self._archive_file(task.filepath, task.filename)
+                self._archive_file(task.filepath)
 
         return processed
+
+    def _ensure_category_dirs(self) -> None:
+        """根据 categories.json 自动创建 input 子目录"""
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "categories.json"
+        )
+        if not os.path.exists(config_path):
+            return
+
+        with open(config_path, encoding="utf-8") as f:
+            categories = json.load(f)
+
+        input_folder = self._settings.paths.input_folder
+        for category, subs in categories.items():
+            if category.startswith("_") or not isinstance(subs, list):
+                continue
+            for sub in subs:
+                dir_path = os.path.join(
+                    input_folder, category, f"{sub['name']}_{sub['id']}"
+                )
+                os.makedirs(dir_path, exist_ok=True)
 
     def run(self, once: bool = False) -> None:
         """主循环入口"""
         paths = self._settings.paths
         os.makedirs(paths.input_folder, exist_ok=True)
         os.makedirs(paths.processed_folder, exist_ok=True)
+        self._ensure_category_dirs()
 
         logger.info("Blog Autopilot 启动!")
         logger.info(f"  监控目录: {os.path.abspath(paths.input_folder)}")

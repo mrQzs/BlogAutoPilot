@@ -1,9 +1,25 @@
 """目录扫描 + 路径解析模块"""
 
+import json
 import logging
 import os
 
 from blog_autopilot.constants import ALLOWED_CATEGORIES, SUBCATEGORY_DIR_PATTERN
+
+# 尝试从 categories.json 加载大类列表，失败则回退到常量
+_CATEGORIES_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "categories.json"
+)
+
+
+def _load_allowed_categories() -> tuple[str, ...]:
+    """从 categories.json 加载允许的大类，失败时回退到 constants"""
+    try:
+        with open(_CATEGORIES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return tuple(k for k in data if not k.startswith("_"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ALLOWED_CATEGORIES
 from blog_autopilot.models import CategoryMeta, FileTask
 
 logger = logging.getLogger("blog-autopilot")
@@ -35,7 +51,7 @@ def parse_directory_structure(
         category_name = parts[0]
         subcategory_dir = parts[1]
 
-        if category_name not in ALLOWED_CATEGORIES:
+        if category_name not in _load_allowed_categories():
             logger.warning(f"跳过未知大类: {category_name}")
             return None
 

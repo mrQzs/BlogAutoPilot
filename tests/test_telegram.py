@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from blog_autopilot.config import TelegramSettings
 from blog_autopilot.exceptions import TelegramError
-from blog_autopilot.telegram import send_to_telegram, test_tg_connection
+from blog_autopilot.telegram import send_to_telegram
 
 
 @pytest.fixture

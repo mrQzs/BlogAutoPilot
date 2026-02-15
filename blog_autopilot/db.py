@@ -419,6 +419,33 @@ class Database:
         logger.info(f"关联查询完成: 找到 {len(results)} 篇相关文章")
         return results
 
+    def find_duplicate(
+        self,
+        embedding: list[float],
+        threshold: float = 0.95,
+    ) -> dict | None:
+        """
+        检查是否存在高度相似的文章（内容去重）。
+
+        返回最相似文章的 {id, title, similarity}，不存在则返回 None。
+        """
+        sql = """
+            SELECT id, title, url,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM articles
+            ORDER BY embedding <=> %s::vector
+            LIMIT 1
+        """
+        try:
+            row = self.fetch_one(sql, (str(embedding), str(embedding)))
+        except Exception as e:
+            logger.error(f"去重查询失败: {e}")
+            return None
+
+        if row and float(row["similarity"]) >= threshold:
+            return row
+        return None
+
     # ── 内部辅助 ──
 
     @staticmethod

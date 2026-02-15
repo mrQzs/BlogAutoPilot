@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from blog_autopilot.config import WordPressSettings
 from blog_autopilot.exceptions import WordPressError
-from blog_autopilot.publisher import post_to_wordpress, test_wp_connection
+from blog_autopilot.publisher import post_to_wordpress
 
 
 @pytest.fixture

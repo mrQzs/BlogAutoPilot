@@ -55,7 +55,7 @@ class AIWriter:
         return self._client
 
     @staticmethod
-    @lru_cache(maxsize=8)
+    @lru_cache(maxsize=16)
     def _load_prompt(filename: str) -> str:
         """从 prompts/ 目录加载提示词文件（带缓存）"""
         filepath = PROMPTS_DIR / filename
@@ -63,6 +63,19 @@ class AIWriter:
             return filepath.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise AIAPIError(f"提示词文件不存在: {filepath}")
+
+    def _get_writer_system_prompt(
+        self, category_name: str | None, context: bool = False
+    ) -> str:
+        """按大类加载 writer system prompt，找不到时回退到通用版本"""
+        prefix = "writer_context_system" if context else "writer_system"
+        if category_name:
+            name = category_name.lower()
+            try:
+                return self._load_prompt(f"{prefix}_{name}.txt")
+            except AIAPIError:
+                pass
+        return self._load_prompt(f"{prefix}.txt")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -107,7 +120,9 @@ class AIWriter:
         except Exception as e:
             raise AIAPIError(f"API 调用出错: {e}") from e
 
-    def generate_blog_post(self, raw_text: str) -> ArticleResult:
+    def generate_blog_post(
+        self, raw_text: str, category_name: str | None = None
+    ) -> ArticleResult:
         """
         生成博客文章 (使用 Writer 模型)。
 
@@ -117,7 +132,7 @@ class AIWriter:
         """
         logger.info(f"[Writer] 正在生成博客文章... (原文 {len(raw_text)} 字符)")
 
-        system_prompt = self._load_prompt("writer_system.txt")
+        system_prompt = self._get_writer_system_prompt(category_name)
         user_template = self._load_prompt("writer_user.txt")
         user_prompt = user_template.format(
             raw_text=raw_text[:AI_WRITER_INPUT_LIMIT]
@@ -154,6 +169,7 @@ class AIWriter:
         self,
         raw_text: str,
         associations: list[AssociationResult] | None = None,
+        category_name: str | None = None,
     ) -> ArticleResult:
         """
         增强版文章生成：注入关联文章上下文。
@@ -162,7 +178,7 @@ class AIWriter:
         无关联文章时回退到原有 writer_*.txt 模板。
         """
         if not associations:
-            return self.generate_blog_post(raw_text)
+            return self.generate_blog_post(raw_text, category_name=category_name)
 
         logger.info(
             f"[Writer] 正在生成增强文章... "
@@ -171,7 +187,7 @@ class AIWriter:
 
         context = build_relation_context(associations)
 
-        system_prompt = self._load_prompt("writer_context_system.txt")
+        system_prompt = self._get_writer_system_prompt(category_name, context=True)
         user_template = self._load_prompt("writer_context_user.txt")
         user_prompt = user_template.format(
             raw_text=raw_text[:AI_WRITER_INPUT_LIMIT],

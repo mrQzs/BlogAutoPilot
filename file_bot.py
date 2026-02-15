@@ -1,78 +1,133 @@
+import asyncio
+import json
 import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# ================= 配置区域 =================
-# 1. 填入 BotFather 给你的 Token
-TOKEN = "8504811149:AAELbMB9KKeYmyjdY4XiaR7d1afE2g2ZsnY"
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
-# 2. 填入你想保存文件的服务器绝对路径 (确保文件夹存在，或者脚本有权限创建)
-# Windows 示例: r"C:\Users\Admin\Downloads\TelegramFiles"
-# Linux 示例: "/home/user/downloads/telegram_files"
-SAVE_PATH = "/root/blog-autopilot/input"
-
-# 3. 填入你的 Telegram User ID (数字)，防止他人滥用
-ADMIN_ID = 7465144093 
-# ===========================================
-
-# 设置日志，方便调试
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # --- 1. 安全检查 ---
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("🚫 你没有权限使用此机器人。")
+ALLOWED_EXTENSIONS = (".doc", ".docx", ".pdf", ".md", ".markdown", ".txt")
+
+
+def load_bots_from_config():
+    """从 categories.json 读取 bot 配置列表"""
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        config = json.load(f)
+
+    bot_cfg = config.get("_bots", {})
+    admin_id = bot_cfg.get("admin_id")
+    base_input = bot_cfg.get("main_save_path", "/root/BlogAutoPilot/input")
+
+    bots = []
+
+    # 主 bot（接收文件到 input 根目录）
+    main_token = bot_cfg.get("main_token")
+    if main_token:
+        bots.append({
+            "token": main_token,
+            "save_path": base_input,
+            "name": "MainBot",
+        })
+
+    # 子分类 bot（有 bot_token 字段的子类）
+    for category, subs in config.items():
+        if category.startswith("_") or not isinstance(subs, list):
+            continue
+        for sub in subs:
+            token = sub.get("bot_token")
+            if token:
+                name = f"{category}_{sub['name']}Bot"
+                save_path = os.path.join(
+                    base_input, category, f"{sub['name']}_{sub['id']}"
+                )
+                bots.append({
+                    "token": token,
+                    "save_path": save_path,
+                    "name": name,
+                })
+
+    return admin_id, bots
+
+
+def make_handler(save_path: str, bot_name: str, admin_id: int):
+    """为每个 bot 创建独立的文件处理函数"""
+
+    async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id != admin_id:
+            await update.message.reply_text("你没有权限使用此机器人。")
+            return
+
+        document = update.message.document
+        file_name = document.file_name
+
+        if not file_name.lower().endswith(ALLOWED_EXTENSIONS):
+            await update.message.reply_text(
+                f"忽略文件: {file_name} (格式不支持)"
+            )
+            return
+
+        try:
+            os.makedirs(save_path, exist_ok=True)
+            new_file = await context.bot.get_file(document.file_id)
+            save_location = os.path.join(save_path, file_name)
+            await new_file.download_to_drive(save_location)
+            await update.message.reply_text(f"[{bot_name}] 文件已保存: {file_name}")
+            logger.info(f"[{bot_name}] 保存文件: {save_location}")
+        except Exception as e:
+            await update.message.reply_text(f"下载失败: {e}")
+            logger.error(f"[{bot_name}] 错误: {e}")
+
+    return handle_document
+
+
+async def main():
+    admin_id, bots = load_bots_from_config()
+
+    if not bots:
+        logger.error("categories.json 中未配置任何 bot")
         return
 
-    # --- 2. 获取文件信息 ---
-    document = update.message.document
-    file_name = document.file_name
-    file_id = document.file_id
-    
-    # 获取文件后缀名，判断是否为目标格式 (Word, PDF, Markdown)
-    # Markdown 文件通常是 .md 或 .markdown
-    allowed_extensions = ('.doc', '.docx', '.pdf', '.md', '.markdown')
-    
-    if not file_name.lower().endswith(allowed_extensions):
-        await update.message.reply_text(f"⚠️ 忽略文件: {file_name} (格式不符合要求)")
+    started = []
+    for bot_cfg in bots:
+        name = bot_cfg["name"]
+        try:
+            app = ApplicationBuilder().token(bot_cfg["token"]).build()
+            handler = make_handler(bot_cfg["save_path"], name, admin_id)
+            app.add_handler(MessageHandler(filters.Document.ALL, handler))
+            await app.initialize()
+            await app.start()
+            await app.updater.start_polling()
+            started.append((app, name))
+            logger.info(f"[{name}] 已启动 -> {bot_cfg['save_path']}")
+        except Exception as e:
+            logger.error(f"[{name}] 启动失败: {e}")
+
+    if not started:
+        logger.error("所有 bot 启动失败，退出")
         return
 
-    # --- 3. 下载文件 ---
+    logger.info(f"共 {len(started)} 个机器人运行中")
+
+    stop_event = asyncio.Event()
     try:
-        # 确保保存目录存在
-        if not os.path.exists(SAVE_PATH):
-            os.makedirs(SAVE_PATH)
+        await stop_event.wait()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        for app, name in started:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            logger.info(f"[{name}] 已停止")
 
-        # 获取文件对象
-        new_file = await context.bot.get_file(file_id)
-        
-        # 拼接完整保存路径
-        save_location = os.path.join(SAVE_PATH, file_name)
-        
-        # 下载并保存
-        await new_file.download_to_drive(save_location)
-        
-        await update.message.reply_text(f"✅ 文件已保存: {file_name}")
-        print(f"成功保存文件: {save_location}")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ 下载失败: {e}")
-        print(f"错误: {e}")
 
-if __name__ == '__main__':
-    # 创建应用
-    application = ApplicationBuilder().token(TOKEN).build()
-
-    # 添加处理器：只监听文档类型的消息
-    # filters.Document.ALL 会捕获所有文件，我们在函数内部再过滤后缀
-    file_handler = MessageHandler(filters.Document.ALL, handle_document)
-    application.add_handler(file_handler)
-
-    print("🤖 机器人已启动，正在监听文件...")
-    # 运行机器人
-    application.run_polling()
+if __name__ == "__main__":
+    asyncio.run(main())

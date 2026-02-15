@@ -3,7 +3,7 @@
 import re
 
 # 允许的大类列表
-ALLOWED_CATEGORIES = ("Articles", "Books", "Magazine", "News")
+ALLOWED_CATEGORIES = ("Articles", "Books", "Magazine", "News", "Paper")
 
 # 子类目录命名正则：子类名_数字
 SUBCATEGORY_DIR_PATTERN = re.compile(r"^(.+)_(\d+)$")
@@ -21,7 +21,7 @@ MIN_EXTRACTED_TEXT_LENGTH = 50
 MAX_FILENAME_LENGTH = 100
 
 # 监控间隔（秒）
-POLL_INTERVAL = 600
+POLL_INTERVAL = 60
 
 # WordPress 默认分类 ID
 DEFAULT_WP_CATEGORY_ID = 15
@@ -58,3 +58,6 @@ EMBEDDING_CACHE_SIZE = 1000
 RELATION_STRONG = "强关联"
 RELATION_MEDIUM = "中关联"
 RELATION_WEAK = "弱关联"
+
+# 内容去重相似度阈值（高于此值视为重复文章）
+DUPLICATE_SIMILARITY_THRESHOLD = 0.95

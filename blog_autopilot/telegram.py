@@ -35,29 +35,39 @@ def send_to_telegram(
         "# 📌 Telegram 频道推广文案", ""
     ).strip()
 
-    msg = f"{promo_text}\n\n👉 **阅读全文**: {link}"
+    msg = f"{promo_text}\n\n👉 <b>阅读全文</b>: {link}"
 
     token = settings.bot_token.get_secret_value()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": settings.channel_id,
-        "text": msg,
-        "parse_mode": "Markdown",
-    }
 
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        data = resp.json()
-    except Exception as e:
-        raise TelegramError(f"Telegram 推送异常: {e}") from e
+    # 优先用 HTML（更宽容），解析失败则降级为纯文本
+    for parse_mode in ("HTML", None):
+        payload = {
+            "chat_id": settings.channel_id,
+            "text": msg,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
-    if data.get("ok"):
-        logger.info("Telegram 推送成功!")
-        return True
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            data = resp.json()
+        except Exception as e:
+            raise TelegramError(f"Telegram 推送异常: {e}") from e
 
-    raise TelegramError(
-        f"Telegram 推送失败: {data.get('description', '未知错误')}"
-    )
+        if data.get("ok"):
+            logger.info("Telegram 推送成功!")
+            return True
+
+        # 解析错误时降级重试
+        desc = data.get("description", "")
+        if "can't parse entities" in desc and parse_mode:
+            logger.warning(f"Telegram {parse_mode} 解析失败，降级为纯文本重试")
+            continue
+
+        raise TelegramError(f"Telegram 推送失败: {desc or '未知错误'}")
+
+    return False
 
 
 def test_tg_connection(settings: TelegramSettings) -> bool:

@@ -1,0 +1,27 @@
+{
+  "_bots": {
+    "admin_id": 7465144093,
+    "main_token": "8504811149:AAELbMB9KKeYmyjdY4XiaR7d1afE2g2ZsnY",
+    "main_save_path": "/root/BlogAutoPilot/input"
+  },
+  "Articles": [
+    {"name": "Featured", "id": 39}
+  ],
+  "Books": [
+    {"name": "Readed", "id": 40},
+    {"name": "Recommend", "id": 41}
+  ],
+  "Magazine": [
+    {"name": "Science", "id": 28, "bot_token": "8541608652:AAFb81arnIWT9Qp9H_ne5hA3LROa_EMjX6s"},
+    {"name": "Economy", "id": 29, "bot_token": "8471057367:AAFNzRQtRMwhDvAqzxQ8T3hsrBHtUwjukBs"},
+    {"name": "Literature", "id": 30, "bot_token": "8510511281:AAF9UZLsE_4x-qqxocA5p71YQI5Xx1L1Ma8"},
+    {"name": "Technology", "id": 31, "bot_token": "8589080647:AAEGTVbfFmf20a70DiBvzxZYzAfMbmZaBaw"},
+    {"name": "Medicine", "id": 32, "bot_token": "8094860343:AAGAv_dPrCqVE0z5Jq4aFSDGqjj25j67nSA"}
+  ],
+  "News": [
+    {"name": "GoodNews", "id": 42}
+  ],
+  "Paper": [
+    {"name": "Excerpt", "id": 43, "bot_token": "8256881170:AAHc4q2rV7SCW6GFAbNlowMvbf_W_-57ZZY"}
+  ]
+}
