@@ -28,3 +28,4 @@ input/
 
 # Claude Code
 .claude/
+/docs
