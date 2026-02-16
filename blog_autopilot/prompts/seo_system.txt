@@ -11,4 +11,8 @@
 字段规范：
 - meta_description：中文摘要，120-160 个字符，用于搜索引擎结果展示
 - slug：纯英文小写字母和连字符，不超过 75 个字符，反映文章主题的 URL 别名
+  · 中文标题请翻译为英文核心关键词（不要用拼音）
+  · 去除冠词（a/an/the）和常见介词（of/in/on/for/with/to）
+  · 示例：「深度学习在医疗影像中的应用」→ deep-learning-medical-imaging
+  · 示例：「2024 年 AI 编程工具横评」→ 2024-ai-coding-tools-comparison
 - wp_tags：3-8 个中文关键词标签，每个不超过 30 个字符，覆盖文章核心主题

@@ -106,13 +106,13 @@ class TopicRecommender:
         gaps = []
         # 三级组合缺口（更细粒度）
         for key3, count in combo3_counts.items():
-            recency = 1.0
+            staleness_weight = 1.0
             if key3 in combo3_latest:
                 days = (now - combo3_latest[key3]).days
-                recency = min(days / 30.0, RECOMMEND_RECENCY_CAP)
-                recency = max(recency, 0.1)
+                staleness_weight = min(days / 30.0, RECOMMEND_RECENCY_CAP)
+                staleness_weight = max(staleness_weight, 0.1)
 
-            score = (1.0 / (count + 1)) * recency
+            score = (1.0 / (count + 1)) * staleness_weight
             mag, sci, topic = key3
             gaps.append(ContentGap(
                 gap_type="tag_gap",
@@ -218,61 +218,39 @@ class TopicRecommender:
         # 按 (magazine, science, topic) 合并
         merged: dict[tuple, ContentGap] = {}
 
-        for g in norm_tag:
-            if g.tags:
-                key = (
-                    g.tags.tag_magazine,
-                    g.tags.tag_science,
-                    g.tags.tag_topic,
-                )
-            else:
-                key = (g.description,)
-            score = g.gap_score * RECOMMEND_TAG_GAP_WEIGHT
-            if key in merged:
-                old = merged[key]
-                merged[key] = ContentGap(
-                    gap_type="merged",
-                    description=f"{old.description} + {g.description}",
-                    gap_score=old.gap_score + score,
-                    tags=old.tags or g.tags,
-                    reference_title=old.reference_title or g.reference_title,
-                )
-            else:
-                merged[key] = ContentGap(
-                    gap_type=g.gap_type,
-                    description=g.description,
-                    gap_score=score,
-                    tags=g.tags,
-                    reference_title=g.reference_title,
-                )
+        def _accumulate(
+            gaps: list[ContentGap], weight: float,
+        ) -> None:
+            for g in gaps:
+                if g.tags:
+                    key = (
+                        g.tags.tag_magazine,
+                        g.tags.tag_science,
+                        g.tags.tag_topic,
+                    )
+                else:
+                    key = (g.description,)
+                score = g.gap_score * weight
+                if key in merged:
+                    old = merged[key]
+                    merged[key] = ContentGap(
+                        gap_type="merged",
+                        description=f"{old.description} + {g.description}",
+                        gap_score=old.gap_score + score,
+                        tags=old.tags or g.tags,
+                        reference_title=old.reference_title or g.reference_title,
+                    )
+                else:
+                    merged[key] = ContentGap(
+                        gap_type=g.gap_type,
+                        description=g.description,
+                        gap_score=score,
+                        tags=g.tags,
+                        reference_title=g.reference_title,
+                    )
 
-        for g in norm_vec:
-            if g.tags:
-                key = (
-                    g.tags.tag_magazine,
-                    g.tags.tag_science,
-                    g.tags.tag_topic,
-                )
-            else:
-                key = (g.description,)
-            score = g.gap_score * RECOMMEND_VECTOR_GAP_WEIGHT
-            if key in merged:
-                old = merged[key]
-                merged[key] = ContentGap(
-                    gap_type="merged",
-                    description=f"{old.description} + {g.description}",
-                    gap_score=old.gap_score + score,
-                    tags=old.tags or g.tags,
-                    reference_title=old.reference_title or g.reference_title,
-                )
-            else:
-                merged[key] = ContentGap(
-                    gap_type=g.gap_type,
-                    description=g.description,
-                    gap_score=score,
-                    tags=g.tags,
-                    reference_title=g.reference_title,
-                )
+        _accumulate(norm_tag, RECOMMEND_TAG_GAP_WEIGHT)
+        _accumulate(norm_vec, RECOMMEND_VECTOR_GAP_WEIGHT)
 
         result = sorted(
             merged.values(), key=lambda g: g.gap_score, reverse=True

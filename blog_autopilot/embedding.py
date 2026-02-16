@@ -38,7 +38,7 @@ class EmbeddingClient:
     @staticmethod
     def _text_hash(text: str) -> str:
         """计算文本 hash 作为缓存 key"""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _cache_get(self, text: str) -> list[float] | None:
         """从缓存获取 embedding"""

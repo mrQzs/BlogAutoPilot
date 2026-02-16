@@ -208,6 +208,23 @@ class Database:
             ON articles (series_id, series_order)
             WHERE series_id IS NOT NULL
             """,
+
+            # 单列标签索引（加速关联查询预过滤）
+            """
+            CREATE INDEX IF NOT EXISTS idx_articles_tag_magazine
+            ON articles (tag_magazine)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_articles_tag_science
+            ON articles (tag_science)
+            """,
+
+            # 部分索引：未加入系列的文章（加速 find_recent_similar_articles）
+            """
+            CREATE INDEX IF NOT EXISTS idx_articles_no_series
+            ON articles (tag_magazine, tag_science, tag_topic, created_at DESC)
+            WHERE series_id IS NULL
+            """,
         ]
 
         try:
@@ -224,11 +241,15 @@ class Database:
                     """)
                     if not cur.fetchone():
                         try:
-                            cur.execute("""
+                            # 动态计算 IVFFlat lists 参数
+                            cur.execute("SELECT COUNT(*) FROM articles")
+                            n = cur.fetchone()[0]
+                            lists = max(10, min(1000, int(n ** 0.5))) if n > 0 else 100
+                            cur.execute(f"""
                                 CREATE INDEX idx_articles_embedding
                                 ON articles
                                 USING ivfflat (embedding vector_cosine_ops)
-                                WITH (lists = 100)
+                                WITH (lists = {lists})
                             """)
                         except Exception:
                             # IVFFlat 索引要求表中已有足够数据，
@@ -245,6 +266,25 @@ class Database:
             raise DatabaseError(f"Schema 初始化失败: {e}") from e
 
     # ── CRUD 操作 ──
+
+    def rebuild_vector_index(self) -> None:
+        """重建向量索引（数据量变化后调用以优化 lists 参数）"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM articles")
+                    n = cur.fetchone()[0]
+                    lists = max(10, min(1000, int(n ** 0.5))) if n > 0 else 100
+                    cur.execute("DROP INDEX IF EXISTS idx_articles_embedding")
+                    cur.execute(f"""
+                        CREATE INDEX idx_articles_embedding
+                        ON articles
+                        USING ivfflat (embedding vector_cosine_ops)
+                        WITH (lists = {lists})
+                    """)
+            logger.info(f"向量索引重建完成 (lists={lists}, articles={n})")
+        except Exception as e:
+            raise DatabaseError(f"向量索引重建失败: {e}") from e
 
     @staticmethod
     def _generate_id() -> str:
@@ -391,6 +431,9 @@ class Database:
                     ) AS tag_match_count
                 FROM articles
                 WHERE id != %s
+                  -- 预过滤：TAG_MATCH_THRESHOLD=2 时，至少需匹配 magazine 或 science 之一
+                  -- 注意：这会排除仅匹配 topic+content 的文章（极少见，可接受的性能权衡）
+                  AND (tag_magazine = %s OR tag_science = %s)
             )
             SELECT
                 id, title, tg_promo, url, created_at,
@@ -414,6 +457,8 @@ class Database:
             tags.tag_topic,
             tags.tag_content,
             exclude_id,
+            tags.tag_magazine,
+            tags.tag_science,
             RELATION_STRONG,
             RELATION_MEDIUM,
             RELATION_WEAK,
@@ -655,7 +700,7 @@ class Database:
         用于判断是否应创建新系列。
         """
         sql = """
-            SELECT id, title, url, wp_post_id, series_id,
+            SELECT id, title, url, wp_post_id, series_id, created_at,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM articles
             WHERE tag_magazine = %s AND tag_science = %s AND tag_topic = %s

@@ -53,6 +53,27 @@ logger = logging.getLogger("blog-autopilot")
 # 提示词目录：基于本文件所在位置
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
+# 控制字符正则（保留换行和制表符）
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# 句子结束标点
+_SENTENCE_ENDS = frozenset("。！？.!?")
+
+
+def sanitize_input(text: str, max_length: int) -> str:
+    """清洗输入文本：移除控制字符，在句子边界截断。"""
+    # 移除控制字符（保留 \n \r \t）
+    text = _CONTROL_CHAR_RE.sub("", text)
+    if len(text) <= max_length:
+        return text
+    # 在 max_length 范围内找最后一个句子结束标点
+    truncated = text[:max_length]
+    for i in range(len(truncated) - 1, max(0, len(truncated) - 200), -1):
+        if truncated[i] in _SENTENCE_ENDS:
+            return truncated[: i + 1]
+    # 找不到句子边界，硬截断
+    return truncated
+
 # 标签提取 JSON 必需字段
 _TAGGER_REQUIRED_FIELDS = (
     "title", "tag_magazine", "tag_science",
@@ -183,7 +204,7 @@ class AIWriter:
         system_prompt = self._get_writer_system_prompt(category_name)
         user_template = self._load_prompt("writer_user.txt")
         user_prompt = user_template.format(
-            raw_text=raw_text[:AI_WRITER_INPUT_LIMIT]
+            raw_text=sanitize_input(raw_text, AI_WRITER_INPUT_LIMIT)
         )
 
         response = self.call_claude(
@@ -195,6 +216,7 @@ class AIWriter:
 
         article = self._parse_article_response(response)
 
+        _warn_unclosed_tags(article.html_body)
         logger.info(
             f"文章生成完成 | 标题: {article.title} | 正文长度: {len(article.html_body)} 字符"
         )
@@ -225,7 +247,7 @@ class AIWriter:
         system_prompt = self._get_writer_system_prompt(category_name, context=True)
         user_template = self._load_prompt("writer_context_user.txt")
         user_prompt = user_template.format(
-            raw_text=raw_text[:AI_WRITER_INPUT_LIMIT],
+            raw_text=sanitize_input(raw_text, AI_WRITER_INPUT_LIMIT),
             strong_relations=context["strong_relations"],
             medium_relations=context["medium_relations"],
             weak_relations=context["weak_relations"],
@@ -240,6 +262,7 @@ class AIWriter:
 
         article = self._parse_article_response(response)
 
+        _warn_unclosed_tags(article.html_body)
         logger.info(
             f"增强文章生成完成 | 标题: {article.title} | 正文长度: {len(article.html_body)} 字符"
         )
@@ -347,7 +370,11 @@ class AIWriter:
         )
 
         data = _parse_review_response(response)
-        review = _validate_review(data)
+        review = _validate_review(
+            data,
+            pass_threshold=self._settings.quality_pass_threshold,
+            rewrite_threshold=self._settings.quality_rewrite_threshold,
+        )
 
         logger.info(
             f"审核完成 | 一致性: {review.consistency_score} | "
@@ -381,7 +408,7 @@ class AIWriter:
             issues_text=format_issues_for_rewrite(review.issues),
             source_preview=source_text[:QUALITY_INPUT_PREVIEW_LIMIT],
             title=title,
-            article_body=html_body[:AI_WRITER_INPUT_LIMIT],
+            article_body=sanitize_input(html_body, AI_WRITER_INPUT_LIMIT),
         )
 
         response = self.call_claude(
@@ -421,7 +448,7 @@ class AIWriter:
         system_prompt = self._load_prompt("tagger_system.txt")
         user_template = self._load_prompt("tagger_user.txt")
         user_prompt = user_template.format(
-            article_content=article_content[:AI_WRITER_INPUT_LIMIT]
+            article_content=sanitize_input(article_content, AI_WRITER_INPUT_LIMIT)
         )
 
         response = self.call_claude(
@@ -620,7 +647,11 @@ def _validate_review_fields(data: dict) -> None:
         )
 
 
-def _validate_review(data: dict) -> QualityReview:
+def _validate_review(
+    data: dict,
+    pass_threshold: int = QUALITY_PASS_THRESHOLD,
+    rewrite_threshold: int = QUALITY_REWRITE_THRESHOLD,
+) -> QualityReview:
     """
     验证并构建 QualityReview 对象。
 
@@ -650,9 +681,9 @@ def _validate_review(data: dict) -> QualityReview:
         + ai_cliche * QUALITY_WEIGHT_AI_CLICHE
     )
 
-    if overall >= QUALITY_PASS_THRESHOLD:
+    if overall >= pass_threshold:
         verdict = "pass"
-    elif overall >= QUALITY_REWRITE_THRESHOLD:
+    elif overall >= rewrite_threshold:
         verdict = "rewrite"
     else:
         verdict = "draft"
@@ -739,6 +770,24 @@ def validate_tags(tags: TagSet) -> TagSet:
         normalized[field_name] = value
 
     return TagSet(**normalized)
+
+
+# ── HTML 标签匹配检查 ──
+
+_CHECKED_TAGS = ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "ul", "ol", "li", "blockquote", "pre", "table")
+
+
+def _warn_unclosed_tags(html: str) -> None:
+    """检查常见 HTML 标签的开闭数量是否匹配，不匹配时记录警告。"""
+    for tag in _CHECKED_TAGS:
+        opens = len(re.findall(rf"<{tag}[\s>]", html, re.IGNORECASE))
+        closes = len(re.findall(rf"</{tag}>", html, re.IGNORECASE))
+        if opens != closes:
+            logger.warning(
+                f"HTML 标签不匹配: <{tag}> 开启 {opens} 次, "
+                f"关闭 {closes} 次"
+            )
 
 
 # ── 关联上下文组装 (Task 21) ──

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from typing import TYPE_CHECKING
@@ -37,13 +38,13 @@ def has_series_title_pattern(title: str) -> bool:
 # ── 相似度计算 ──
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """计算两个向量的余弦相似度"""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
+    """计算两个向量的余弦相似度（数值稳定版本）"""
+    dot = math.fsum(x * y for x, y in zip(a, b))
+    norm_a = math.fsum(x * x for x in a) ** 0.5
+    norm_b = math.fsum(x * x for x in b) ** 0.5
+    if norm_a < 1e-10 or norm_b < 1e-10:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return max(-1.0, min(1.0, dot / (norm_a * norm_b)))
 
 
 def _avg_similarity(
@@ -127,22 +128,28 @@ def _detect_series_impl(
     )
 
     if similar:
-        # 至少有 1 篇相似文章 → 与新文章一起构成 2 篇，可创建系列
-        first_match = similar[0]
+        # 至少有 1 篇相似文章 → 与新文章一起构成系列
         series_id = str(uuid.uuid4())[:12]
         series_title = f"{tags.tag_topic}系列"
         db.create_series(
             series_id, series_title,
             tags.tag_magazine, tags.tag_science, tags.tag_topic,
         )
-        # 将已有文章加入系列
-        db.add_to_series(first_match["id"], series_id, 1)
-        new_order = 2
+        # 按创建时间排序后分配 series_order（最早的排第一）
+        similar_sorted = sorted(
+            similar,
+            key=lambda r: r.get("created_at") or "",
+        )
+        for idx, match in enumerate(similar_sorted, 1):
+            db.add_to_series(match["id"], series_id, idx)
+        new_order = len(similar_sorted) + 1
 
-        prev_article = db.get_article(first_match["id"])
+        # 上一篇 = 时间最晚的已有文章（series_order 最大）
+        prev_match = similar_sorted[-1]
+        prev_article = db.get_article(prev_match["id"])
         logger.info(
             f"创建新系列《{series_title}》"
-            f"(首篇: {first_match['title']}, 新文章位置: {new_order})"
+            f"(纳入 {len(similar_sorted)} 篇已有文章, 新文章位置: {new_order})"
         )
         return SeriesInfo(
             series_id=series_id,

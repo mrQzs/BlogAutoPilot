@@ -40,6 +40,8 @@ class AISettings(BaseSettings):
     quality_review_enabled: bool = True
     model_reviewer: str = ""
     reviewer_max_tokens: int = 4096
+    quality_pass_threshold: int = 7
+    quality_rewrite_threshold: int = 5
 
 
 class DatabaseSettings(BaseSettings):

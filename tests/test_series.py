@@ -7,6 +7,7 @@ import pytest
 from blog_autopilot.constants import SERIES_NAV_CSS_CLASS
 from blog_autopilot.models import ArticleRecord, SeriesInfo, TagSet
 from blog_autopilot.series import (
+    _cosine_similarity,
     build_backfill_navigation,
     build_series_navigation,
     has_series_title_pattern,
@@ -16,6 +17,48 @@ from blog_autopilot.series import (
 
 
 # ── 标题模式检测 ──
+
+
+class TestCosineSimilarity:
+    def test_identical_vectors(self):
+        v = [1.0, 2.0, 3.0]
+        assert abs(_cosine_similarity(v, v) - 1.0) < 1e-9
+
+    def test_orthogonal_vectors(self):
+        a = [1.0, 0.0, 0.0]
+        b = [0.0, 1.0, 0.0]
+        assert abs(_cosine_similarity(a, b)) < 1e-9
+
+    def test_opposite_vectors(self):
+        a = [1.0, 2.0, 3.0]
+        b = [-1.0, -2.0, -3.0]
+        assert abs(_cosine_similarity(a, b) - (-1.0)) < 1e-9
+
+    def test_zero_vector_returns_zero(self):
+        a = [0.0, 0.0, 0.0]
+        b = [1.0, 2.0, 3.0]
+        assert _cosine_similarity(a, b) == 0.0
+        assert _cosine_similarity(b, a) == 0.0
+
+    def test_near_zero_vector_returns_zero(self):
+        a = [1e-12, 1e-12, 1e-12]
+        b = [1.0, 2.0, 3.0]
+        assert _cosine_similarity(a, b) == 0.0
+
+    def test_result_clamped_to_valid_range(self):
+        """结果应始终在 [-1, 1] 范围内"""
+        a = [1.0] * 3072
+        b = [1.0] * 3072
+        sim = _cosine_similarity(a, b)
+        assert -1.0 <= sim <= 1.0
+
+    def test_high_dimensional_stability(self):
+        """3072 维向量的数值稳定性"""
+        import math
+        a = [math.sin(i) for i in range(3072)]
+        b = [math.cos(i) for i in range(3072)]
+        sim = _cosine_similarity(a, b)
+        assert -1.0 <= sim <= 1.0
 
 
 class TestHasSeriesTitlePattern:
