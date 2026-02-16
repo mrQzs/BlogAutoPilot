@@ -6,6 +6,50 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+@dataclass
+class TokenUsage:
+    """单次 API 调用的 token 用量"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+    task: str = ""  # "writer" | "promo" | "tagger" | "reviewer" | "seo"
+
+
+@dataclass
+class TokenUsageSummary:
+    """流水线级别的 token 用量汇总"""
+    calls: list[TokenUsage]
+
+    def __init__(self):
+        self.calls = []
+
+    def add(self, usage: TokenUsage) -> None:
+        self.calls.append(usage)
+
+    @property
+    def total_prompt_tokens(self) -> int:
+        return sum(u.prompt_tokens for u in self.calls)
+
+    @property
+    def total_completion_tokens(self) -> int:
+        return sum(u.completion_tokens for u in self.calls)
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(u.total_tokens for u in self.calls)
+
+    def summary_str(self) -> str:
+        if not self.calls:
+            return "Token 用量: 无 API 调用"
+        return (
+            f"Token 用量: {self.total_tokens:,} "
+            f"(输入: {self.total_prompt_tokens:,}, "
+            f"输出: {self.total_completion_tokens:,}, "
+            f"调用: {len(self.calls)} 次)"
+        )
+
+
 @dataclass(frozen=True)
 class CategoryMeta:
     """目录解析后的分类元数据"""

@@ -2,16 +2,90 @@
 
 import base64
 import logging
+import re as _re
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
-from tenacity import retry, retry_if_result, stop_after_attempt, wait_fixed
+from tenacity import retry, retry_if_exception, retry_if_result, stop_after_attempt, wait_fixed
 
 from blog_autopilot.config import WordPressSettings
 from blog_autopilot.exceptions import WordPressError
 
 logger = logging.getLogger("blog-autopilot")
+
+
+# ── HTML 清洗 ──
+
+# 危险标签（直接移除整个标签及内容）
+# 注意：闭合标签允许空白 </script > 以防绕过
+_DANGEROUS_TAGS_RE = _re.compile(
+    r"<(script|iframe|object|embed|form|input|textarea|button|select|link|meta|base)"
+    r"[\s>].*?</\1\s*>|"
+    r"<(script|iframe|object|embed|form|input|textarea|button|select|link|meta|base)"
+    r"[^>]*/?>",
+    _re.IGNORECASE | _re.DOTALL,
+)
+
+# 未闭合的危险标签（移除标签本身，防止浏览器解析执行）
+_UNCLOSED_DANGEROUS_RE = _re.compile(
+    r"<(script|iframe|object|embed)[^>]*>",
+    _re.IGNORECASE,
+)
+
+# 事件属性（on* 属性）
+_EVENT_ATTR_RE = _re.compile(
+    r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)',
+    _re.IGNORECASE,
+)
+
+# javascript: 协议
+_JS_PROTOCOL_RE = _re.compile(
+    r'(href|src|action)\s*=\s*["\']?\s*javascript:',
+    _re.IGNORECASE,
+)
+
+# data: 协议（除了 data:image）
+_DATA_PROTOCOL_RE = _re.compile(
+    r'(href|src|action)\s*=\s*["\']?\s*data:(?!image/)',
+    _re.IGNORECASE,
+)
+
+
+def sanitize_html(html: str) -> str:
+    """
+    清洗 AI 生成的 HTML，移除潜在的 XSS/注入内容。
+
+    - 移除 script/iframe/object/embed/form 等危险标签
+    - 移除 on* 事件属性
+    - 移除 javascript: 和非图片 data: 协议
+    """
+    if not html:
+        return html
+
+    original_len = len(html)
+
+    # 1. 移除危险标签（含内容）
+    html = _DANGEROUS_TAGS_RE.sub("", html)
+
+    # 1.5 移除残留的未闭合危险标签
+    html = _UNCLOSED_DANGEROUS_RE.sub("", html)
+
+    # 2. 移除事件属性
+    html = _EVENT_ATTR_RE.sub("", html)
+
+    # 3. 移除 javascript: 协议
+    html = _JS_PROTOCOL_RE.sub(r'\1=""', html)
+
+    # 4. 移除非图片 data: 协议
+    html = _DATA_PROTOCOL_RE.sub(r'\1=""', html)
+
+    if len(html) != original_len:
+        logger.warning(
+            f"HTML 清洗移除了 {original_len - len(html)} 字符的潜在危险内容"
+        )
+
+    return html
 
 
 @dataclass(frozen=True)
@@ -24,6 +98,11 @@ class PublishResult:
 def _is_server_error(result: str | None) -> bool:
     """tenacity 重试条件：仅当返回 None（即 5xx 失败）时重试"""
     return result is None
+
+
+def _is_retryable_wp_error(exc: BaseException) -> bool:
+    """tenacity 重试条件：仅当 WordPressError.retryable=True 时重试"""
+    return isinstance(exc, WordPressError) and exc.retryable
 
 
 def _build_auth_header(settings: WordPressSettings) -> dict[str, str]:
@@ -133,7 +212,7 @@ def ensure_wp_tags(
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_fixed(5),
-    retry=retry_if_result(_is_server_error),
+    retry=retry_if_exception(_is_retryable_wp_error),
     reraise=True,
 )
 def post_to_wordpress(
@@ -154,6 +233,7 @@ def post_to_wordpress(
     抛出 WordPressError 当发布失败时。
     """
     effective_category = category_id or settings.target_category_id
+    content = sanitize_html(content)
     logger.info(
         f"正在发布到博客: 《{title}》 "
         f"(状态: {status}, 分类ID: {effective_category})"
@@ -183,10 +263,14 @@ def post_to_wordpress(
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code
         body = e.response.text[:500]
-        # 5xx 返回 None 触发重试
+        # 5xx 抛出可重试异常
         if status_code >= 500:
             logger.warning(f"WordPress 服务器错误 ({status_code}), 将重试...")
-            return None  # type: ignore[return-value]
+            raise WordPressError(
+                f"WordPress 服务器错误 ({status_code})",
+                status_code=status_code,
+                retryable=True,
+            ) from e
         raise WordPressError(
             f"博客发布失败 (HTTP {status_code}): {body}",
             status_code=status_code,
@@ -199,8 +283,12 @@ def post_to_wordpress(
     data = resp.json()
     post_id = data.get("id")
     post_link = data.get("link")
+    if not post_id or not post_link:
+        raise WordPressError(
+            f"WordPress 返回数据不完整: id={post_id}, link={post_link}"
+        )
     logger.info(f"博客发布成功! ID: {post_id} | URL: {post_link}")
-    return PublishResult(url=post_link, post_id=post_id)
+    return PublishResult(url=post_link, post_id=int(post_id))
 
 
 def _build_post_url(post_id: int, settings: WordPressSettings) -> str:

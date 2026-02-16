@@ -7,12 +7,15 @@ from functools import lru_cache
 from pathlib import Path
 
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from blog_autopilot.config import AISettings
 from blog_autopilot.constants import (
     AI_PROMO_PREVIEW_LIMIT,
     AI_WRITER_INPUT_LIMIT,
+    CATEGORY_QUALITY_THRESHOLDS,
+    CATEGORY_TEMPERATURE,
+    DEFAULT_TEMPERATURE,
     QUALITY_INPUT_PREVIEW_LIMIT,
     QUALITY_PASS_THRESHOLD,
     QUALITY_REQUIRED_FIELDS,
@@ -46,6 +49,8 @@ from blog_autopilot.models import (
     QualityReview,
     SEOMetadata,
     TagSet,
+    TokenUsage,
+    TokenUsageSummary,
 )
 
 logger = logging.getLogger("blog-autopilot")
@@ -84,12 +89,22 @@ _TAGGER_REQUIRED_FIELDS = (
 _SEO_REQUIRED_FIELDS = ("meta_description", "slug", "wp_tags")
 
 
+def _is_retryable_ai_error(exc: BaseException) -> bool:
+    """判断 AI API 错误是否值得重试（排除认证、格式等永久性错误）"""
+    msg = str(exc).lower()
+    if exc.__cause__:
+        msg += " " + str(exc.__cause__).lower()
+    non_retryable = ("401", "403", "invalid_api_key", "authentication", "permission")
+    return not any(keyword in msg for keyword in non_retryable)
+
+
 class AIWriter:
     """AI 写作器，延迟创建 OpenAI client"""
 
     def __init__(self, settings: AISettings) -> None:
         self._settings = settings
         self._client: OpenAI | None = None
+        self._usage_summary = TokenUsageSummary()
 
     @property
     def client(self) -> OpenAI:
@@ -100,6 +115,13 @@ class AIWriter:
                 default_headers=self._settings.default_headers,
             )
         return self._client
+
+    @property
+    def usage_summary(self) -> TokenUsageSummary:
+        return self._usage_summary
+
+    def reset_usage(self) -> None:
+        self._usage_summary = TokenUsageSummary()
 
     @staticmethod
     @lru_cache(maxsize=16)
@@ -146,17 +168,55 @@ class AIWriter:
                 pass
         return self._load_prompt(f"{prefix}.txt")
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        reraise=True,
-    )
     def call_claude(
         self,
         prompt: str,
         system: str = "",
         model: str | None = None,
         max_tokens: int = 4000,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> str:
+        """API 调用（带重试 + 模型回退）"""
+        try:
+            return self._call_claude_with_retry(
+                prompt, system, model, max_tokens, temperature,
+            )
+        except AIAPIError:
+            # 尝试回退模型
+            fallback = self._get_fallback_model(model)
+            if fallback:
+                logger.warning(f"主模型失败，切换到备用模型: {fallback}")
+                return self._call_claude_with_retry(
+                    prompt, system, fallback, max_tokens, temperature,
+                )
+            raise
+
+    def _get_fallback_model(self, model: str | None) -> str | None:
+        """获取备用模型名称"""
+        primary = model or self._settings.model_writer
+        if primary == self._settings.model_writer and self._settings.model_writer_fallback:
+            return self._settings.model_writer_fallback
+        if primary == self._settings.model_promo and self._settings.model_promo_fallback:
+            return self._settings.model_promo_fallback
+        # reviewer 和其他使用 promo 模型的任务，回退到 promo fallback
+        reviewer = self._settings.model_reviewer
+        if reviewer and primary == reviewer and self._settings.model_promo_fallback:
+            return self._settings.model_promo_fallback
+        return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_retryable_ai_error),
+        reraise=True,
+    )
+    def _call_claude_with_retry(
+        self,
+        prompt: str,
+        system: str = "",
+        model: str | None = None,
+        max_tokens: int = 4000,
+        temperature: float = DEFAULT_TEMPERATURE,
     ) -> str:
         """
         通用 API 调用（带重试）。
@@ -174,16 +234,24 @@ class AIWriter:
                 model=model or self._settings.model_writer,
                 messages=messages,
                 max_tokens=max_tokens,
-                temperature=0.7,
+                temperature=temperature,
             )
 
             result = response.choices[0].message.content
             usage = response.usage
+            effective_model = model or self._settings.model_writer
             logger.info(
-                f"API 调用成功 | 模型: {model} | "
+                f"API 调用成功 | 模型: {effective_model} | "
                 f"输入: {usage.prompt_tokens} | "
                 f"输出: {usage.completion_tokens}"
             )
+            token_usage = TokenUsage(
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                model=effective_model,
+            )
+            self._usage_summary.add(token_usage)
             return result
 
         except Exception as e:
@@ -207,11 +275,13 @@ class AIWriter:
             raw_text=sanitize_input(raw_text, AI_WRITER_INPUT_LIMIT)
         )
 
+        temp = CATEGORY_TEMPERATURE.get(category_name, DEFAULT_TEMPERATURE) if category_name else DEFAULT_TEMPERATURE
         response = self.call_claude(
             prompt=user_prompt,
             system=system_prompt,
             model=self._settings.model_writer,
             max_tokens=self._settings.writer_max_tokens,
+            temperature=temp,
         )
 
         article = self._parse_article_response(response)
@@ -253,11 +323,13 @@ class AIWriter:
             weak_relations=context["weak_relations"],
         )
 
+        temp = CATEGORY_TEMPERATURE.get(category_name, DEFAULT_TEMPERATURE) if category_name else DEFAULT_TEMPERATURE
         response = self.call_claude(
             prompt=user_prompt,
             system=system_prompt,
             model=self._settings.model_writer,
             max_tokens=self._settings.writer_max_tokens,
+            temperature=temp,
         )
 
         article = self._parse_article_response(response)
@@ -342,6 +414,8 @@ class AIWriter:
 
     def review_quality(
         self, title: str, html_body: str, source_text: str,
+        pass_threshold: int | None = None,
+        rewrite_threshold: int | None = None,
     ) -> QualityReview:
         """
         调用 AI 对生成的文章进行质量审核。
@@ -372,8 +446,8 @@ class AIWriter:
         data = _parse_review_response(response)
         review = _validate_review(
             data,
-            pass_threshold=self._settings.quality_pass_threshold,
-            rewrite_threshold=self._settings.quality_rewrite_threshold,
+            pass_threshold=pass_threshold or self._settings.quality_pass_threshold,
+            rewrite_threshold=rewrite_threshold or self._settings.quality_rewrite_threshold,
         )
 
         logger.info(
@@ -467,6 +541,13 @@ class AIWriter:
             tag_content=data["tag_content"],
         )
         tags = validate_tags(tags)
+        from blog_autopilot.tag_normalizer import normalize_synonym
+        tags = TagSet(
+            tag_magazine=normalize_synonym(tags.tag_magazine),
+            tag_science=normalize_synonym(tags.tag_science),
+            tag_topic=normalize_synonym(tags.tag_topic),
+            tag_content=normalize_synonym(tags.tag_content),
+        )
 
         tg_promo = data["tg_promo"].strip()
         promo_len = len(tg_promo)

@@ -1,5 +1,7 @@
 """主流水线模块 — Pipeline 类"""
 
+import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -96,6 +98,26 @@ class Pipeline:
 
     def process_file(self, task: FileTask) -> PipelineResult:
         """处理单个文件的完整流水线"""
+        # 文件锁：防止多进程同时处理同一文件
+        try:
+            lock_fd = open(task.filepath, "r")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            logger.info(f"跳过 {task.filename}: 文件正被其他进程处理")
+            return PipelineResult(
+                filename=task.filename, success=False,
+                error="文件被锁定，跳过处理",
+            )
+
+        try:
+            return self._process_file_impl(task)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    def _process_file_impl(self, task: FileTask) -> PipelineResult:
+        """处理单个文件的实际逻辑（已持有文件锁）"""
+        self._writer.reset_usage()
         meta = task.metadata
         logger.info(f"\n{'='*50}")
         logger.info(f"开始处理: {task.filename}")
@@ -165,6 +187,7 @@ class Pipeline:
                 series_info = detect_series(
                     self._database, pre_tags, pre_embedding,
                     pre_title or "",
+                    ai_writer=self._writer,
                 )
             except SeriesDetectionError as e:
                 logger.warning(f"系列检测失败（不影响发布）: {e}")
@@ -186,9 +209,20 @@ class Pipeline:
         # ③.2 质量审核（失败不阻断发布）
         if self._settings.ai.quality_review_enabled:
             try:
+                # 获取分类专属质量阈值
+                from blog_autopilot.constants import CATEGORY_QUALITY_THRESHOLDS
+                cat_thresholds = CATEGORY_QUALITY_THRESHOLDS.get(meta.category_name)
                 review = self._writer.review_quality(
                     article.title, article.html_body, raw_text,
+                    pass_threshold=cat_thresholds[0] if cat_thresholds else None,
+                    rewrite_threshold=cat_thresholds[1] if cat_thresholds else None,
                 )
+                # 审核结果入库
+                if self._database:
+                    self._database.insert_review(
+                        article.title, review,
+                        category_name=meta.category_name,
+                    )
                 if review.verdict == "draft":
                     self._save_draft(task.filename, article.title, article.html_body)
                     return PipelineResult(
@@ -208,7 +242,15 @@ class Pipeline:
                     )
                     review = self._writer.review_quality(
                         article.title, article.html_body, raw_text,
+                        pass_threshold=cat_thresholds[0] if cat_thresholds else None,
+                        rewrite_threshold=cat_thresholds[1] if cat_thresholds else None,
                     )
+                    # 审核结果入库
+                    if self._database:
+                        self._database.insert_review(
+                            article.title, review,
+                            category_name=meta.category_name,
+                        )
 
                 if review.verdict == "rewrite":
                     self._save_draft(task.filename, article.title, article.html_body)
@@ -353,8 +395,8 @@ class Pipeline:
 
                 tags = pre_tags
                 embedding = pre_embedding
-                # 如果之前关联查询失败，这里重新提取
-                if tags is None:
+                # 如果之前关联查询失败或 embedding 缺失，重新提取
+                if tags is None or embedding is None:
                     tags, tg_promo, _ = self._writer.extract_tags_and_promo(
                         article.html_body
                     )
@@ -381,6 +423,11 @@ class Pipeline:
                 logger.info(f"新文章已入库: {article.title}")
             except Exception as e:
                 logger.warning(f"文章入库失败（不影响发布）: {e}")
+                self._save_failed_ingest(
+                    article.title, blog_link, wp_post_id,
+                    tags, embedding, tg_promo,
+                    series_info,
+                )
 
         # ⑥ 推广
         try:
@@ -392,6 +439,8 @@ class Pipeline:
             logger.warning(f"推广失败（文章已发布）: {e}")
 
         logger.info(f"{task.filename} 处理完成! -> {blog_link}")
+        # Token 用量汇总
+        logger.info(self._writer.usage_summary.summary_str())
         return PipelineResult(
             filename=task.filename,
             success=True,
@@ -409,6 +458,113 @@ class Pipeline:
             f.write(f"<!-- 标题: {title} -->\n{html}")
 
         logger.info(f"草稿已保存到: {draft_path}")
+
+    def _save_failed_ingest(
+        self,
+        title: str,
+        url: str,
+        wp_post_id: int,
+        tags,
+        embedding,
+        tg_promo: str,
+        series_info,
+    ) -> None:
+        """入库失败时保存记录，供后续重试"""
+        failed_dir = os.path.join(
+            os.path.dirname(self._settings.paths.drafts_folder),
+            "failed_ingests",
+        )
+        os.makedirs(failed_dir, exist_ok=True)
+
+        record = {
+            "title": title,
+            "url": url,
+            "wp_post_id": wp_post_id,
+            "tg_promo": tg_promo,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        if tags:
+            record["tags"] = {
+                "tag_magazine": tags.tag_magazine,
+                "tag_science": tags.tag_science,
+                "tag_topic": tags.tag_topic,
+                "tag_content": tags.tag_content,
+            }
+        if series_info:
+            record["series_id"] = series_info.series_id
+            record["series_order"] = series_info.order
+        # embedding 太大不存 JSON，重试时重新生成
+
+        filename = hashlib.md5(title.encode()).hexdigest()[:12] + ".json"
+        filepath = os.path.join(failed_dir, filename)
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=2)
+            logger.info(f"入库失败记录已保存: {filepath}")
+        except Exception as save_err:
+            logger.error(f"保存入库失败记录也失败了: {save_err}")
+
+    def retry_failed_ingests(self) -> int:
+        """重试之前入库失败的记录"""
+        failed_dir = os.path.join(
+            os.path.dirname(self._settings.paths.drafts_folder),
+            "failed_ingests",
+        )
+        if not os.path.isdir(failed_dir):
+            return 0
+
+        if not self._association_enabled or not self._ingestor:
+            return 0
+
+        retried = 0
+        for fname in os.listdir(failed_dir):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(failed_dir, fname)
+            try:
+                with open(fpath, encoding="utf-8") as f:
+                    record = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                logger.warning(f"入库重试文件损坏，已删除 ({fname}): {e}")
+                os.remove(fpath)
+                continue
+
+            try:
+                from blog_autopilot.models import ArticleRecord, TagSet
+                from blog_autopilot.db import Database
+
+                tags_data = record.get("tags")
+                if not tags_data:
+                    logger.warning(f"入库重试记录缺少标签，已删除 ({fname})")
+                    os.remove(fpath)
+                    continue
+
+                tags = TagSet(**tags_data)
+                tg_promo = record.get("tg_promo", "")
+                embedding = self._embedding_client.get_embedding(tg_promo)
+
+                article_record = ArticleRecord(
+                    id=Database._generate_id(),
+                    title=record["title"],
+                    tags=tags,
+                    tg_promo=tg_promo,
+                    embedding=embedding,
+                    url=record.get("url"),
+                )
+                self._database.insert_article(
+                    article_record,
+                    series_id=record.get("series_id"),
+                    series_order=record.get("series_order"),
+                    wp_post_id=record.get("wp_post_id"),
+                )
+                os.remove(fpath)
+                retried += 1
+                logger.info(f"入库重试成功: {record['title']}")
+            except Exception as e:
+                logger.warning(f"入库重试失败 ({fname}): {e}")
+
+        return retried
 
     def _get_archive_path(self, filepath: str) -> str:
         """根据 input 中的相对路径，计算 processed 中的对应路径"""
@@ -438,6 +594,24 @@ class Pipeline:
 
         if not file_list:
             return 0
+
+        # 发布时段检查
+        if self._settings.schedule.publish_window_enabled:
+            from datetime import datetime
+            now = datetime.now()
+            start = self._settings.schedule.publish_window_start
+            end = self._settings.schedule.publish_window_end
+            if start <= end:
+                in_window = start <= now.hour < end
+            else:
+                # 跨午夜窗口 (如 22:00 - 06:00)
+                in_window = now.hour >= start or now.hour < end
+            if not in_window:
+                logger.info(
+                    f"当前时间 {now.strftime('%H:%M')} 不在发布窗口 "
+                    f"({start}:00-{end}:00)，跳过处理"
+                )
+                return 0
 
         logger.info(f"发现 {len(file_list)} 个文件待处理")
         processed = 0
@@ -497,6 +671,12 @@ class Pipeline:
         os.makedirs(paths.input_folder, exist_ok=True)
         os.makedirs(paths.processed_folder, exist_ok=True)
         self._ensure_category_dirs()
+
+        # 重试之前入库失败的记录
+        if self._association_enabled:
+            retried = self.retry_failed_ingests()
+            if retried:
+                logger.info(f"入库重试完成: {retried} 篇文章")
 
         logger.info("Blog Autopilot 启动!")
         logger.info(f"  监控目录: {os.path.abspath(paths.input_folder)}")

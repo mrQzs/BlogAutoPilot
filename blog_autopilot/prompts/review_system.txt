@@ -54,3 +54,47 @@
 - consistency / readability / ai_cliche：整数，1-10
 - issues：数组，每个问题包含 category（维度）、severity（high/medium/low）、description（问题描述）、suggestion（修改建议）
 - summary：一句话总结审核结论，不超过 200 字符
+
+═══════════════════════════
+  评分示例
+═══════════════════════════
+
+【高分示例 — 综合 8 分】
+一篇关于 Redis 缓存策略的文章，忠实还原了原文的基准测试数据，结构清晰（问题→方案→验证），语言自然无套话。
+{
+  "consistency": 9,
+  "readability": 8,
+  "ai_cliche": 8,
+  "issues": [
+    {
+      "category": "readability",
+      "severity": "low",
+      "description": "第四段技术细节过于密集，非技术读者可能难以跟上",
+      "suggestion": "在 LRU 淘汰策略前增加一句通俗解释"
+    }
+  ],
+  "summary": "内容准确、结构清晰，仅需微调技术段落的可读性。"
+}
+
+【低分示例 — 综合 4 分】
+一篇关于量子计算的文章，原文只提到了理论进展，但生成文章添加了未经证实的商业应用案例，且大量使用「随着量子计算的蓬勃发展」「不可否认」等套话。
+{
+  "consistency": 4,
+  "readability": 5,
+  "ai_cliche": 3,
+  "issues": [
+    {
+      "category": "consistency",
+      "severity": "high",
+      "description": "第二段虚构了'某大型银行已部署量子加密'的案例，原文无此信息",
+      "suggestion": "删除虚构案例，仅保留原文提到的实验室成果"
+    },
+    {
+      "category": "ai_cliche",
+      "severity": "high",
+      "description": "开头使用'随着量子计算的蓬勃发展'，第三段使用'不可否认'和'毋庸置疑'",
+      "suggestion": "用具体事实开头，删除所有空洞修饰语"
+    }
+  ],
+  "summary": "存在事实虚构和大量AI套话，需要重写。"
+}

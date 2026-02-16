@@ -65,18 +65,25 @@ class TestDatabaseCRUD:
     def test_insert_article(self, db_settings, sample_article_record):
         db, mock_conn, mock_cursor = self._make_db_with_mock(db_settings)
 
-        with patch.object(db, "execute") as mock_exec:
+        with patch.object(db, "get_connection") as mock_get_conn:
+            mock_get_conn.return_value.__enter__ = lambda s: mock_conn
+            mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
             result_id = db.insert_article(sample_article_record)
             assert result_id == "test-001"
-            mock_exec.assert_called_once()
+            mock_cursor.execute.assert_called_once()
 
     def test_insert_article_duplicate_id(self, db_settings, sample_article_record):
         db = Database(db_settings)
 
-        with patch.object(
-            db, "execute",
-            side_effect=DatabaseError("duplicate key value")
-        ):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = Exception("duplicate key value")
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(db, "get_connection") as mock_get_conn:
+            mock_get_conn.return_value.__enter__ = lambda s: mock_conn
+            mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
             with pytest.raises(DatabaseError, match="重复"):
                 db.insert_article(sample_article_record)
 

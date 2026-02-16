@@ -209,6 +209,23 @@ class Database:
             WHERE series_id IS NOT NULL
             """,
 
+            # ── 审核日志表 ──
+            """
+            CREATE TABLE IF NOT EXISTS article_reviews (
+                id              SERIAL PRIMARY KEY,
+                article_title   VARCHAR(200) NOT NULL,
+                consistency     INT NOT NULL,
+                readability     INT NOT NULL,
+                ai_cliche       INT NOT NULL,
+                overall_score   INT NOT NULL,
+                verdict         VARCHAR(20) NOT NULL,
+                issues_json     TEXT,
+                summary         VARCHAR(500),
+                category_name   VARCHAR(50),
+                created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+            """,
+
             # 单列标签索引（加速关联查询预过滤）
             """
             CREATE INDEX IF NOT EXISTS idx_articles_tag_magazine
@@ -323,9 +340,13 @@ class Database:
         )
 
         try:
-            self.execute(sql, params)
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
             logger.info(f"文章入库成功: {article_id} - {record.title}")
             return article_id
+        except DatabaseError:
+            raise
         except Exception as e:
             if "duplicate key" in str(e).lower():
                 raise DatabaseError(
@@ -721,6 +742,74 @@ class Database:
         except Exception as e:
             logger.error(f"相似文章查询失败: {e}")
             return []
+
+    # ── 审核记录 ──
+
+    def insert_review(
+        self,
+        article_title: str,
+        review,  # QualityReview
+        category_name: str | None = None,
+    ) -> None:
+        """记录审核结果"""
+        import json
+        issues_json = json.dumps(
+            [
+                {
+                    "category": i.category,
+                    "severity": i.severity,
+                    "description": i.description,
+                    "suggestion": i.suggestion,
+                }
+                for i in review.issues
+            ],
+            ensure_ascii=False,
+        ) if review.issues else "[]"
+
+        sql = """
+            INSERT INTO article_reviews
+                (article_title, consistency, readability, ai_cliche,
+                 overall_score, verdict, issues_json, summary, category_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        try:
+            self.execute(sql, (
+                article_title,
+                review.consistency_score,
+                review.readability_score,
+                review.ai_cliche_score,
+                review.overall_score,
+                review.verdict,
+                issues_json,
+                review.summary,
+                category_name,
+            ))
+        except Exception as e:
+            logger.warning(f"审核记录保存失败: {e}")
+
+    def get_review_stats(self, limit: int = 100) -> dict:
+        """获取审核统计数据（基于最近 limit 条记录）"""
+        rows = self.fetch_all(
+            """
+            WITH recent AS (
+                SELECT * FROM article_reviews
+                ORDER BY created_at DESC LIMIT %s
+            )
+            SELECT verdict, COUNT(*) as cnt,
+                   AVG(overall_score) as avg_score,
+                   AVG(consistency) as avg_consistency,
+                   AVG(readability) as avg_readability,
+                   AVG(ai_cliche) as avg_ai_cliche
+            FROM recent
+            GROUP BY verdict
+            ORDER BY cnt DESC
+            """,
+            (limit,),
+        )
+        return {
+            "by_verdict": rows,
+            "total": sum(r["cnt"] for r in rows),
+        }
 
     # ── 内部辅助 ──
 

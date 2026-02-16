@@ -86,6 +86,29 @@ QUALITY_REQUIRED_FIELDS = (
     "consistency", "readability", "ai_cliche", "issues", "summary",
 )
 
+# ── 分类专属质量阈值 ──
+# 格式: {category_name: (pass_threshold, rewrite_threshold)}
+# 未配置的分类使用默认值 (QUALITY_PASS_THRESHOLD, QUALITY_REWRITE_THRESHOLD)
+CATEGORY_QUALITY_THRESHOLDS: dict[str, tuple[int, int]] = {
+    "News": (6, 4),       # 新闻时效性优先，适当放宽
+    "Paper": (8, 6),      # 论文类要求更严格
+    "Books": (8, 6),      # 书评类要求更严格
+    "Articles": (7, 5),   # 默认标准
+    "Magazine": (7, 5),   # 默认标准
+}
+
+# ── 分类专属 AI temperature ──
+# 未配置的分类使用默认值 0.7
+CATEGORY_TEMPERATURE: dict[str, float] = {
+    "News": 0.4,          # 新闻准确性优先
+    "Paper": 0.5,         # 论文严谨性优先
+    "Books": 0.8,         # 书评创意优先
+    "Articles": 0.7,      # 默认
+    "Magazine": 0.8,      # 杂志创意优先
+}
+
+DEFAULT_TEMPERATURE = 0.7
+
 # ── 主题推荐常量 ──
 RECOMMEND_DEFAULT_TOP_N = 5
 RECOMMEND_TAG_GAP_WEIGHT = 0.6

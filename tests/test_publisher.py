@@ -147,3 +147,26 @@ class TestEnsureWPTags:
         mock_create.side_effect = [10, None, 30]
         ids = ensure_wp_tags(("标签1", "失败标签", "标签3"), wp_settings)
         assert ids == [10, 30]
+
+
+class TestPostToWordpress5xx:
+
+    @patch("blog_autopilot.publisher.requests.post")
+    def test_5xx_raises_retryable_wp_error(self, mock_post, wp_settings):
+        """5xx 错误应抛出 retryable=True 的 WordPressError"""
+        import requests as req
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 502
+        mock_resp.text = "Bad Gateway"
+        http_err = req.exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_err
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(WordPressError) as exc_info:
+            post_to_wordpress("Title", "<p>Body</p>", wp_settings)
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.status_code == 502
+        # tenacity retries once (stop_after_attempt=2), so 2 calls total
+        assert mock_post.call_count == 2

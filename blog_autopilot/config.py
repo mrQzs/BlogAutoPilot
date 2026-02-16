@@ -2,7 +2,7 @@
 
 import logging
 from functools import lru_cache
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,20 @@ class WordPressSettings(BaseSettings):
     user: str
     app_password: SecretStr
     target_category_id: int = 15
+
+    @field_validator("url")
+    @classmethod
+    def url_must_be_http(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        return v
+
+    @field_validator("user")
+    @classmethod
+    def user_must_be_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("user must not be empty")
+        return v
 
 
 class TelegramSettings(BaseSettings):
@@ -29,6 +43,8 @@ class AISettings(BaseSettings):
     api_base: str = "https://api.ikuncode.cc/v1"
     model_writer: str = "claude-opus-4-6"
     model_promo: str = "claude-haiku-4-5-20251001"
+    model_writer_fallback: str = ""
+    model_promo_fallback: str = ""
     writer_max_tokens: int = 200_000
     promo_max_tokens: int = 10_000
     default_headers: dict[str, str] = {"User-Agent": "MyBlogWriter/1.0"}
@@ -43,6 +59,13 @@ class AISettings(BaseSettings):
     quality_pass_threshold: int = 7
     quality_rewrite_threshold: int = 5
 
+    @field_validator("api_base")
+    @classmethod
+    def api_base_must_be_http(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("api_base must start with http:// or https://")
+        return v
+
 
 class DatabaseSettings(BaseSettings):
     """PostgreSQL 连接配置"""
@@ -54,6 +77,20 @@ class DatabaseSettings(BaseSettings):
     name: str = "blog_articles"
     user: str = ""
     password: SecretStr = SecretStr("")
+
+    @field_validator("port")
+    @classmethod
+    def port_must_be_valid(cls, v: int) -> int:
+        if not 1 <= v <= 65535:
+            raise ValueError("port must be in range 1-65535")
+        return v
+
+    @field_validator("host")
+    @classmethod
+    def host_must_be_non_empty_when_no_url(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("host must not be empty when url is not set")
+        return v
 
     def get_dsn(self) -> str:
         """返回 PostgreSQL 连接字符串"""
@@ -74,6 +111,36 @@ class EmbeddingSettings(BaseSettings):
     model: str = "text-embedding-3-large"
     dimensions: int = 3072
 
+    @field_validator("dimensions")
+    @classmethod
+    def dimensions_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("dimensions must be positive")
+        return v
+
+    @field_validator("api_base")
+    @classmethod
+    def api_base_must_be_http(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("api_base must start with http:// or https://")
+        return v
+
+
+class ScheduleSettings(BaseSettings):
+    """发布时段配置"""
+    model_config = SettingsConfigDict(env_prefix="SCHEDULE_", extra="ignore")
+
+    publish_window_enabled: bool = False
+    publish_window_start: int = 8   # 开始小时 (0-23)
+    publish_window_end: int = 22    # 结束小时 (0-23)
+
+    @field_validator("publish_window_start", "publish_window_end")
+    @classmethod
+    def hour_must_be_valid(cls, v: int) -> int:
+        if not 0 <= v <= 23:
+            raise ValueError("hour must be in range 0-23")
+        return v
+
 
 class PathSettings(BaseSettings):
     input_folder: str = "./input"
@@ -92,6 +159,7 @@ class Settings:
         paths: PathSettings | None = None,
         database: DatabaseSettings | None = None,
         embedding: EmbeddingSettings | None = None,
+        schedule: ScheduleSettings | None = None,
     ) -> None:
         _env = ".env"
         self.wp = wp or WordPressSettings(_env_file=_env)
@@ -112,6 +180,13 @@ class Settings:
                 self.embedding = EmbeddingSettings(_env_file=_env)
             except Exception:
                 self.embedding = EmbeddingSettings()
+        if schedule is not None:
+            self.schedule = schedule
+        else:
+            try:
+                self.schedule = ScheduleSettings(_env_file=_env)
+            except Exception:
+                self.schedule = ScheduleSettings()
 
 
 @lru_cache(maxsize=1)
