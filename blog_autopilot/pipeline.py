@@ -20,15 +20,19 @@ from blog_autopilot.exceptions import (
     ExtractionError,
     QualityReviewError,
     SEOExtractionError,
+    SeriesDetectionError,
     TelegramError,
     WordPressError,
 )
 from blog_autopilot.extractor import extract_text_from_file
 from blog_autopilot.models import FileTask, PipelineResult
 from blog_autopilot.publisher import (
+    PublishResult,
     ensure_wp_tags,
+    get_wp_post_content,
     post_to_wordpress,
     test_wp_connection,
+    update_wp_post_content,
 )
 from blog_autopilot.scanner import scan_input_directory
 from blog_autopilot.telegram import send_to_telegram, test_tg_connection
@@ -116,9 +120,10 @@ class Pipeline:
         pre_tags = None
         pre_tg_promo = None
         pre_embedding = None
+        pre_title = None
         if self._association_enabled:
             try:
-                pre_tags, pre_tg_promo, _ = self._writer.extract_tags_and_promo(
+                pre_tags, pre_tg_promo, pre_title = self._writer.extract_tags_and_promo(
                     raw_text
                 )
                 pre_embedding = self._embedding_client.get_embedding(
@@ -151,6 +156,20 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"关联查询失败，回退到原有模式: {e}")
                 associations = None
+
+        # ②.5 系列检测（如果数据库可用）
+        series_info = None
+        if self._association_enabled and pre_tags and pre_embedding:
+            try:
+                from blog_autopilot.series import detect_series
+                series_info = detect_series(
+                    self._database, pre_tags, pre_embedding,
+                    pre_title or "",
+                )
+            except SeriesDetectionError as e:
+                logger.warning(f"系列检测失败（不影响发布）: {e}")
+            except Exception as e:
+                logger.warning(f"系列检测异常（不影响发布）: {e}")
 
         # ③ AI 生成文章（有关联时使用增强模式）
         try:
@@ -240,9 +259,25 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"封面图步骤异常（不影响发布）: {e}")
 
+        # ③.9 注入系列导航（如果检测到系列）
+        if series_info:
+            try:
+                from blog_autopilot.series import inject_series_navigation
+                from blog_autopilot.models import ArticleResult as _AR
+                html_with_nav = inject_series_navigation(
+                    article.html_body, series_info,
+                )
+                article = _AR(title=article.title, html_body=html_with_nav)
+                logger.info(
+                    f"已注入系列导航: 《{series_info.series_title}》"
+                    f"第 {series_info.order}/{series_info.total} 篇"
+                )
+            except Exception as e:
+                logger.warning(f"系列导航注入失败（不影响发布）: {e}")
+
         # ④ 发布到 WordPress
         try:
-            blog_link = post_to_wordpress(
+            publish_result = post_to_wordpress(
                 title=article.title,
                 content=article.html_body,
                 settings=self._settings.wp,
@@ -252,6 +287,8 @@ class Pipeline:
                 tag_ids=wp_tag_ids,
                 featured_media=featured_media_id,
             )
+            blog_link = publish_result.url
+            wp_post_id = publish_result.post_id
         except WordPressError as e:
             logger.error(f"{task.filename}: WordPress 发布失败 - {e}")
             self._save_draft(task.filename, article.title, article.html_body)
@@ -261,6 +298,52 @@ class Pipeline:
                 title=article.title,
                 error=str(e),
             )
+
+        # ④.5 回溯更新上一篇文章的系列导航
+        if series_info and series_info.prev_article:
+            try:
+                from blog_autopilot.series import (
+                    build_backfill_navigation,
+                    replace_series_navigation,
+                )
+                prev_wp_id = self._database.get_wp_post_id(
+                    series_info.prev_article.id,
+                )
+                if prev_wp_id:
+                    old_content = get_wp_post_content(
+                        prev_wp_id, self._settings.wp,
+                    )
+                    if old_content:
+                        # 上一篇的 prev_article
+                        prev_of_prev = None
+                        if series_info.order > 2:
+                            members = self._database.get_series_articles(
+                                series_info.series_id,
+                            )
+                            for i, m in enumerate(members):
+                                if m.id == series_info.prev_article.id and i > 0:
+                                    prev_of_prev = members[i - 1]
+                                    break
+
+                        new_nav = build_backfill_navigation(
+                            series_title=series_info.series_title,
+                            order=series_info.order - 1,
+                            total=series_info.total,
+                            prev_article=prev_of_prev,
+                            next_article_title=article.title,
+                            next_article_url=blog_link,
+                        )
+                        updated_content = replace_series_navigation(
+                            old_content, new_nav,
+                        )
+                        update_wp_post_content(
+                            prev_wp_id, updated_content, self._settings.wp,
+                        )
+                        logger.info(
+                            f"已回溯更新上一篇导航 (post_id={prev_wp_id})"
+                        )
+            except Exception as e:
+                logger.warning(f"回溯更新导航失败（不影响发布）: {e}")
 
         # ⑤ 新文章入库（如果数据库可用）
         if self._association_enabled and self._ingestor:
@@ -289,7 +372,12 @@ class Pipeline:
                     embedding=embedding,
                     url=blog_link,
                 )
-                self._database.insert_article(record)
+                self._database.insert_article(
+                    record,
+                    series_id=series_info.series_id if series_info else None,
+                    series_order=series_info.order if series_info else None,
+                    wp_post_id=wp_post_id,
+                )
                 logger.info(f"新文章已入库: {article.title}")
             except Exception as e:
                 logger.warning(f"文章入库失败（不影响发布）: {e}")

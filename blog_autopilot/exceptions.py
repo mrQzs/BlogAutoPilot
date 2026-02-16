@@ -59,3 +59,11 @@ class CoverImageError(BlogAutoPilotError):
 
 class QualityReviewError(BlogAutoPilotError):
     """质量审核异常"""
+
+
+class RecommendationError(BlogAutoPilotError):
+    """主题推荐异常"""
+
+
+class SeriesDetectionError(BlogAutoPilotError):
+    """文章系列检测异常"""

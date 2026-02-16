@@ -17,6 +17,7 @@ from blog_autopilot.exceptions import (
     QualityReviewError,
 )
 from blog_autopilot.models import QualityIssue, QualityReview
+from blog_autopilot.publisher import PublishResult
 
 
 def _make_valid_review_json(**overrides) -> str:
@@ -288,7 +289,7 @@ class TestPipelineQualityReview:
         )
 
     @patch("blog_autopilot.pipeline.send_to_telegram")
-    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value="https://test/post-1")
+    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value=PublishResult(url="https://test/post-1", post_id=1))
     @patch("blog_autopilot.pipeline.extract_text_from_file", return_value="原始文本" * 20)
     def test_pass_continues_to_publish(
         self, mock_extract, mock_wp, mock_tg, ai_settings, tmp_dirs,
@@ -332,7 +333,7 @@ class TestPipelineQualityReview:
         assert "质量审核未通过" in result.error
 
     @patch("blog_autopilot.pipeline.send_to_telegram")
-    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value="https://test/post-1")
+    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value=PublishResult(url="https://test/post-1", post_id=1))
     @patch("blog_autopilot.pipeline.extract_text_from_file", return_value="原始文本" * 20)
     def test_rewrite_then_pass(
         self, mock_extract, mock_wp, mock_tg, ai_settings, tmp_dirs,
@@ -420,7 +421,7 @@ class TestPipelineQualityReview:
         assert "质量审核未通过" in result.error or "重写后" in result.error
 
     @patch("blog_autopilot.pipeline.send_to_telegram")
-    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value="https://test/post-1")
+    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value=PublishResult(url="https://test/post-1", post_id=1))
     @patch("blog_autopilot.pipeline.extract_text_from_file", return_value="原始文本" * 20)
     def test_disabled_skips_review(
         self, mock_extract, mock_wp, mock_tg, ai_settings, tmp_dirs,
@@ -441,7 +442,7 @@ class TestPipelineQualityReview:
         assert result.success is True
 
     @patch("blog_autopilot.pipeline.send_to_telegram")
-    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value="https://test/post-1")
+    @patch("blog_autopilot.pipeline.post_to_wordpress", return_value=PublishResult(url="https://test/post-1", post_id=1))
     @patch("blog_autopilot.pipeline.extract_text_from_file", return_value="原始文本" * 20)
     def test_api_failure_degrades_gracefully(
         self, mock_extract, mock_wp, mock_tg, ai_settings, tmp_dirs,

@@ -74,6 +74,20 @@ def main() -> None:
             sys.exit(1)
         return
 
+    # --recommend: 智能选题推荐
+    if "--recommend" in sys.argv:
+        settings = get_settings()
+        top_n = 5
+        if "--top" in sys.argv:
+            idx = sys.argv.index("--top")
+            if idx + 1 < len(sys.argv):
+                top_n = int(sys.argv[idx + 1])
+        from blog_autopilot.recommender import TopicRecommender
+        recommender = TopicRecommender(settings)
+        recommendations = recommender.recommend(top_n=top_n)
+        print(recommender.format_output(recommendations))
+        return
+
     # --once / 默认: 正常运行流水线
     once_mode = "--once" in sys.argv
 

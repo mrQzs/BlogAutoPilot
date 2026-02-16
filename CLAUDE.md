@@ -16,12 +16,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   → AIWriter 提取标签 + embedding 生成（若 DB 可用）
   → 内容去重检查（若 DB 可用，相似度阈值 0.95）
   → 查找关联文章（若 DB 可用，标签过滤 + 向量排序）
+  → 系列检测（若 DB 可用，标签匹配 + 向量相似度）
   → AIWriter 生成博客文章（支持带上下文/不带上下文两种模式）
   → 质量审核（三维度评分 → pass/rewrite/draft，可选）
   → SEO 元数据提取（meta description / slug / wp_tags）
   → 封面图生成 + 上传（可选）
-  → publisher 发布到 WordPress (按目录中的分类 ID)
-  → 文章入库（若 DB 可用）
+  → 注入系列导航 HTML（若检测到系列）
+  → publisher 发布到 WordPress (按目录中的分类 ID，返回 PublishResult)
+  → 回溯更新上一篇文章的系列导航（若有系列）
+  → 文章入库（若 DB 可用，含 series_id/series_order/wp_post_id）
   → AIWriter 生成推广文案
   → telegram 推送到 Telegram 频道
   → 归档到 processed/
@@ -46,6 +49,8 @@ blog_autopilot/
 ├── db.py              # PostgreSQL + pgvector 数据库管理
 ├── embedding.py       # OpenAI Embedding API 客户端（LRU 缓存）
 ├── ingest.py          # 文章入库工作流（批量/单文件）
+├── recommender.py     # 智能选题推荐（标签缺口 + 向量稀疏分析）
+├── series.py          # 文章系列检测 + 导航 HTML 生成 + 回溯更新
 └── prompts/           # 提示词模板
     ├── writer_system.txt          # 通用写作系统提示
     ├── writer_system_{category}.txt  # 分类专属写作提示（5 个分类）
@@ -61,7 +66,9 @@ blog_autopilot/
     ├── seo_user.txt
     ├── review_system.txt          # 质量审核系统提示（三维度评分）
     ├── review_user.txt
-    └── rewrite_feedback_user.txt  # 审核反馈重写提示
+    ├── rewrite_feedback_user.txt  # 审核反馈重写提示
+    ├── recommend_system.txt       # 选题推荐系统提示
+    └── recommend_user.txt         # 选题推荐用户提示
 ```
 
 ### 关键设计
@@ -72,11 +79,13 @@ blog_autopilot/
 - **凭据管理**：所有敏感信息在 `.env` 文件中，通过 Pydantic BaseSettings 加载，SecretStr 保护
 - **延迟初始化**：AIWriter 的 OpenAI client 在首次调用时才创建
 - **重试机制**：AI API (3次指数退避)、WordPress (2次固定5s)、Telegram (2次固定3s)
-- **自定义异常**：BlogAutoPilotError 基类，各模块有专属异常类型（含 DatabaseError、EmbeddingError、TagExtractionError、AssociationError、QualityReviewError）
+- **自定义异常**：BlogAutoPilotError 基类，各模块有专属异常类型（含 DatabaseError、EmbeddingError、TagExtractionError、AssociationError、QualityReviewError、RecommendationError、SeriesDetectionError）
 - **文章关联系统**（可选，依赖 DB）：四级标签体系（magazine/science/topic/content）+ 向量相似度搜索，两阶段检索（标签过滤 + embedding 排序）
 - **内容去重**：基于 embedding 相似度检测（阈值 0.95），防止重复发布
 - **质量审核系统**（可选，默认启用）：三维度评分（consistency/readability/ai_cliche），加权综合分 ≥7 pass、≥5 rewrite、<5 draft；自动重写最多 2 次，失败存草稿；审核异常降级发布
 - **分类专属提示词**：每个大类有独立的写作系统提示，支持带上下文和不带上下文两种模式
+- **智能选题推荐**（可选，依赖 DB）：分析标签分布缺口 + 向量空间稀疏区域，AI 生成具体选题建议，避免内容同质化
+- **文章系列检测**（可选，依赖 DB）：自动检测系列文章（标签匹配 + 向量相似度），注入系列导航 HTML（上下篇链接），回溯更新已发布文章的导航；标题模式识别（Part N / 第X篇 / 上中下 / 系列）放宽阈值；`article_series` 表存储系列元数据，`articles` 表新增 `series_id`/`series_order`/`wp_post_id` 列
 - `file_bot.py` 保留在根目录，是独立的 Telegram 文件接收进程
 
 ## Commands
@@ -102,6 +111,12 @@ python -m blog_autopilot --init-db
 
 # 入库文件或目录（可选 --ingest-url 指定来源 URL）
 python -m blog_autopilot --ingest <path> [--ingest-url <url>]
+
+# 智能选题推荐（默认推荐 5 个选题）
+python -m blog_autopilot --recommend
+
+# 指定推荐数量
+python -m blog_autopilot --recommend --top 3
 
 # 运行测试
 pytest tests/ -v

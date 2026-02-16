@@ -2,6 +2,7 @@
 
 import base64
 import logging
+from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -11,6 +12,13 @@ from blog_autopilot.config import WordPressSettings
 from blog_autopilot.exceptions import WordPressError
 
 logger = logging.getLogger("blog-autopilot")
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    """WordPress 发布结果"""
+    url: str
+    post_id: int
 
 
 def _is_server_error(result: str | None) -> bool:
@@ -138,11 +146,11 @@ def post_to_wordpress(
     slug: str | None = None,
     tag_ids: list[int] | None = None,
     featured_media: int | None = None,
-) -> str:
+) -> PublishResult:
     """
     发布文章到 WordPress。
 
-    返回文章链接 URL。
+    返回 PublishResult（含文章链接和 post_id）。
     抛出 WordPressError 当发布失败时。
     """
     effective_category = category_id or settings.target_category_id
@@ -192,7 +200,58 @@ def post_to_wordpress(
     post_id = data.get("id")
     post_link = data.get("link")
     logger.info(f"博客发布成功! ID: {post_id} | URL: {post_link}")
-    return post_link
+    return PublishResult(url=post_link, post_id=post_id)
+
+
+def _build_post_url(post_id: int, settings: WordPressSettings) -> str:
+    """从 posts URL 构造单篇文章 URL"""
+    parsed = urlparse(settings.url)
+    qs = parse_qs(parsed.query)
+    if "rest_route" in qs:
+        route = qs["rest_route"][0].rstrip("/") + f"/{post_id}"
+        new_qs = urlencode({"rest_route": route})
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_qs}"
+    return settings.url.rstrip("/") + f"/{post_id}"
+
+
+def get_wp_post_content(post_id: int, settings: WordPressSettings) -> str | None:
+    """获取 WordPress 文章内容（raw HTML）"""
+    headers = _build_auth_header(settings)
+    url = _build_post_url(post_id, settings)
+
+    try:
+        resp = requests.get(
+            url, headers=headers, params={"context": "edit"}, timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("content", {})
+        # WP REST API 在 context=edit 时返回 {"raw": "...", "rendered": "..."}
+        if isinstance(content, dict):
+            return content.get("raw") or content.get("rendered", "")
+        return str(content)
+    except Exception as e:
+        logger.warning(f"获取文章内容失败 (post_id={post_id}): {e}")
+        return None
+
+
+def update_wp_post_content(
+    post_id: int, content: str, settings: WordPressSettings,
+) -> bool:
+    """更新 WordPress 文章内容"""
+    headers = _build_auth_header(settings)
+    url = _build_post_url(post_id, settings)
+
+    try:
+        resp = requests.post(
+            url, headers=headers, json={"content": content}, timeout=15,
+        )
+        resp.raise_for_status()
+        logger.info(f"文章内容更新成功 (post_id={post_id})")
+        return True
+    except Exception as e:
+        logger.warning(f"文章内容更新失败 (post_id={post_id}): {e}")
+        return False
 
 
 def test_wp_connection(settings: WordPressSettings) -> bool:

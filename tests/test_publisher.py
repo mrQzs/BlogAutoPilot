@@ -38,7 +38,8 @@ class TestPostToWordpress:
         link = post_to_wordpress(
             "Test Title", "<p>Content</p>", wp_settings
         )
-        assert link == "https://test.wp/post-42"
+        assert link.url == "https://test.wp/post-42"
+        assert link.post_id == 42
 
     @patch("blog_autopilot.publisher.requests.post")
     def test_publish_4xx_raises(self, mock_post, wp_settings):
@@ -73,7 +74,7 @@ class TestPostToWordpress:
             slug="test-slug",
             tag_ids=[10, 20],
         )
-        assert link == "https://test.wp/post-99"
+        assert link.url == "https://test.wp/post-99"
 
         payload = mock_post.call_args[1]["json"]
         assert payload["excerpt"] == "Test excerpt"
@@ -110,7 +111,7 @@ class TestPostToWordpress:
             "Cover Title", "<p>Body</p>", wp_settings,
             featured_media=77,
         )
-        assert link == "https://test.wp/post-55"
+        assert link.url == "https://test.wp/post-55"
 
         payload = mock_post.call_args[1]["json"]
         assert payload["featured_media"] == 77

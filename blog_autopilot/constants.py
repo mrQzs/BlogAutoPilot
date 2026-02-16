@@ -85,3 +85,27 @@ QUALITY_INPUT_PREVIEW_LIMIT = 5000
 QUALITY_REQUIRED_FIELDS = (
     "consistency", "readability", "ai_cliche", "issues", "summary",
 )
+
+# ── 主题推荐常量 ──
+RECOMMEND_DEFAULT_TOP_N = 5
+RECOMMEND_TAG_GAP_WEIGHT = 0.6
+RECOMMEND_VECTOR_GAP_WEIGHT = 0.4
+RECOMMEND_RECENCY_CAP = 3.0           # 时间衰减上限倍数
+RECOMMEND_SPARSE_THRESHOLD = 0.7      # nn_similarity 低于此值视为稀疏
+RECOMMEND_FRONTIER_MULTIPLIER = 2     # frontier 查询数 = top_n * multiplier
+RECOMMEND_MIN_ARTICLES = 10           # 最少文章数
+RECOMMEND_RECENT_TITLES_COUNT = 20    # 传给 AI 的最近标题数
+
+# ── 文章系列检测常量 ──
+SERIES_SIMILARITY_THRESHOLD = 0.80
+SERIES_TITLE_PATTERN_THRESHOLD = 0.70
+SERIES_NEW_THRESHOLD = 0.85
+SERIES_LOOKBACK_DAYS = 30
+SERIES_NAV_CSS_CLASS = "blog-series-nav"
+SERIES_TITLE_PATTERNS = (
+    r"[Pp]art\s*\d+",
+    r"第.{1,3}[部篇章节]",
+    r"[（(][上中下][）)]",
+    r"系列|连载|[Ss]eries",
+    r"[（(]\d+[）)]$",
+)

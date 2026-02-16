@@ -1,5 +1,7 @@
 """数据模型"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -108,3 +110,50 @@ class IngestionResult:
     tags: TagSet | None = None
     success: bool = True
     error: str | None = None
+
+
+# ── 智能选题推荐数据模型 ──
+
+
+@dataclass(frozen=True)
+class ContentGap:
+    """内容缺口"""
+    gap_type: str          # "tag_gap" | "vector_gap" | "merged"
+    description: str
+    gap_score: float
+    tags: TagSet | None = None
+    reference_title: str | None = None
+
+
+@dataclass(frozen=True)
+class TopicRecommendation:
+    """主题推荐结果"""
+    topic: str
+    rationale: str
+    suggested_tags: TagSet
+    priority: str          # "high" | "medium" | "low"
+    gap_score: float = 0.0
+
+
+# ── 文章系列数据模型 ──
+
+
+@dataclass(frozen=True)
+class SeriesRecord:
+    """数据库系列记录"""
+    id: str
+    title: str
+    tag_magazine: str
+    tag_science: str
+    tag_topic: str
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class SeriesInfo:
+    """文章系列信息"""
+    series_id: str
+    series_title: str
+    order: int                          # 本文在系列中的位置 (1-based)
+    total: int                          # 系列当前总篇数
+    prev_article: ArticleRecord | None  # 上一篇

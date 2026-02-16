@@ -22,6 +22,7 @@ from blog_autopilot.models import (
     FileTask,
     TagSet,
 )
+from blog_autopilot.publisher import PublishResult
 from blog_autopilot.pipeline import Pipeline
 
 
@@ -87,7 +88,7 @@ class TestPipeline:
     def test_process_file_success(
         self, mock_wp, mock_tg, test_settings, sample_task
     ):
-        mock_wp.return_value = "https://test.wp/post-1"
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
         mock_tg.return_value = True
 
         pipeline = Pipeline(test_settings)
@@ -122,7 +123,7 @@ class TestPipelineNoDatabase:
         self, mock_wp, mock_tg, test_settings, sample_task
     ):
         """无数据库时使用原有生成方式"""
-        mock_wp.return_value = "https://test.wp/post-1"
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
         mock_tg.return_value = True
 
         pipeline = Pipeline(test_settings)
@@ -152,7 +153,7 @@ class TestPipelineWithDatabase:
         self, mock_wp, mock_tg, test_settings, sample_task
     ):
         """有关联文章时使用增强生成"""
-        mock_wp.return_value = "https://test.wp/post-1"
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
 
         pipeline = Pipeline(test_settings)
         mock_article = ArticleResult(
@@ -205,7 +206,7 @@ class TestPipelineWithDatabase:
         self, mock_wp, mock_tg, test_settings, sample_task
     ):
         """关联查询异常时回退到原有模式"""
-        mock_wp.return_value = "https://test.wp/post-1"
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
 
         pipeline = Pipeline(test_settings)
         mock_article = ArticleResult(
@@ -237,7 +238,7 @@ class TestPipelineWithDatabase:
         self, mock_wp, mock_tg, test_settings, sample_task
     ):
         """入库异常不阻断发布"""
-        mock_wp.return_value = "https://test.wp/post-1"
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
 
         pipeline = Pipeline(test_settings)
         mock_article = ArticleResult(

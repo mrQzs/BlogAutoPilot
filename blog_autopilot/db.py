@@ -19,7 +19,7 @@ from blog_autopilot.constants import (
     TAG_MATCH_THRESHOLD,
 )
 from blog_autopilot.exceptions import DatabaseError
-from blog_autopilot.models import ArticleRecord, AssociationResult, TagSet
+from blog_autopilot.models import ArticleRecord, AssociationResult, SeriesRecord, TagSet
 
 logger = logging.getLogger("blog-autopilot")
 
@@ -183,6 +183,31 @@ class Database:
             FOR EACH ROW
             EXECUTE FUNCTION update_timestamp()
             """,
+
+            # ── 文章系列表 ──
+            """
+            CREATE TABLE IF NOT EXISTS article_series (
+                id           VARCHAR(50) PRIMARY KEY,
+                title        VARCHAR(300) NOT NULL,
+                tag_magazine VARCHAR(50) NOT NULL,
+                tag_science  VARCHAR(50) NOT NULL,
+                tag_topic    VARCHAR(50) NOT NULL,
+                created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+            """,
+
+            # articles 表新增系列相关列
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS series_id VARCHAR(50) REFERENCES article_series(id)",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS series_order INT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS wp_post_id INT",
+
+            # 系列成员索引
+            """
+            CREATE INDEX IF NOT EXISTS idx_articles_series
+            ON articles (series_id, series_order)
+            WHERE series_id IS NOT NULL
+            """,
         ]
 
         try:
@@ -226,15 +251,21 @@ class Database:
         """生成唯一文章 ID"""
         return str(uuid.uuid4())[:12]
 
-    def insert_article(self, record: ArticleRecord) -> str:
+    def insert_article(
+        self,
+        record: ArticleRecord,
+        series_id: str | None = None,
+        series_order: int | None = None,
+        wp_post_id: int | None = None,
+    ) -> str:
         """插入新文章记录，返回 article ID"""
         article_id = record.id or self._generate_id()
 
         sql = """
             INSERT INTO articles
                 (id, title, tag_magazine, tag_science, tag_topic, tag_content,
-                 tg_promo, embedding, url)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 tg_promo, embedding, url, series_id, series_order, wp_post_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             article_id,
@@ -246,6 +277,9 @@ class Database:
             record.tg_promo,
             record.embedding,
             record.url,
+            series_id,
+            series_order,
+            wp_post_id,
         )
 
         try:
@@ -282,6 +316,7 @@ class Database:
         allowed = {
             "title", "tag_magazine", "tag_science", "tag_topic",
             "tag_content", "tg_promo", "embedding", "url",
+            "series_id", "series_order", "wp_post_id",
         }
         update_fields = {k: v for k, v in fields.items() if k in allowed}
         if not update_fields:
@@ -445,6 +480,202 @@ class Database:
         if row and float(row["similarity"]) >= threshold:
             return row
         return None
+
+    # ── 主题推荐查询 ──
+
+    def fetch_all_tags_with_dates(self) -> list[dict]:
+        """获取所有文章的标签和创建时间"""
+        return self.fetch_all("""
+            SELECT tag_magazine, tag_science, tag_topic, tag_content, created_at
+            FROM articles ORDER BY created_at DESC
+        """)
+
+    def fetch_recent_titles(self, limit: int = 20) -> list[str]:
+        """获取最近 N 篇文章标题"""
+        rows = self.fetch_all(
+            "SELECT title FROM articles ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        )
+        return [r["title"] for r in rows]
+
+    def compute_centroid(self) -> list[float] | None:
+        """计算所有文章 embedding 的质心向量"""
+        row = self.fetch_one(
+            "SELECT AVG(embedding) as centroid FROM articles"
+        )
+        if row and row["centroid"] is not None:
+            return list(row["centroid"])
+        return None
+
+    def find_frontier_articles(
+        self, centroid: list[float], top_n: int = 10
+    ) -> list[dict]:
+        """找到离质心最远的 N 篇文章（含最近邻相似度）"""
+        sql = """
+            SELECT f.id, f.title,
+                   f.tag_magazine, f.tag_science, f.tag_topic, f.tag_content,
+                   f.dist_centroid,
+                   nn.nn_similarity
+            FROM (
+                SELECT id, title, embedding,
+                       tag_magazine, tag_science, tag_topic, tag_content,
+                       embedding <=> %s::vector AS dist_centroid
+                FROM articles
+                ORDER BY embedding <=> %s::vector DESC
+                LIMIT %s
+            ) f
+            CROSS JOIN LATERAL (
+                SELECT 1 - (a.embedding <=> f.embedding) AS nn_similarity
+                FROM articles a
+                WHERE a.id != f.id
+                ORDER BY a.embedding <=> f.embedding
+                LIMIT 1
+            ) nn
+        """
+        return self.fetch_all(
+            sql, (str(centroid), str(centroid), top_n)
+        )
+
+    # ── 文章系列查询 ──
+
+    def detect_series_candidates(
+        self,
+        tag_magazine: str,
+        tag_science: str,
+        tag_topic: str,
+    ) -> list[SeriesRecord]:
+        """查找匹配 top-3 标签的候选系列"""
+        rows = self.fetch_all(
+            """
+            SELECT id, title, tag_magazine, tag_science, tag_topic, created_at
+            FROM article_series
+            WHERE tag_magazine = %s AND tag_science = %s AND tag_topic = %s
+            """,
+            (tag_magazine, tag_science, tag_topic),
+        )
+        return [
+            SeriesRecord(
+                id=r["id"], title=r["title"],
+                tag_magazine=r["tag_magazine"],
+                tag_science=r["tag_science"],
+                tag_topic=r["tag_topic"],
+                created_at=r.get("created_at"),
+            )
+            for r in rows
+        ]
+
+    def get_series_articles(
+        self, series_id: str,
+    ) -> list[ArticleRecord]:
+        """获取系列中所有文章（按 series_order 排序）"""
+        rows = self.fetch_all(
+            """
+            SELECT id, title, tag_magazine, tag_science, tag_topic, tag_content,
+                   tg_promo, embedding, url, created_at, series_order, wp_post_id
+            FROM articles
+            WHERE series_id = %s
+            ORDER BY series_order ASC
+            """,
+            (series_id,),
+        )
+        return [self._row_to_record(r) for r in rows]
+
+    def get_series_article_embeddings(
+        self, series_id: str,
+    ) -> list[list[float]]:
+        """获取系列中所有文章的 embedding"""
+        rows = self.fetch_all(
+            """
+            SELECT embedding FROM articles
+            WHERE series_id = %s AND embedding IS NOT NULL
+            """,
+            (series_id,),
+        )
+        return [list(r["embedding"]) for r in rows if r.get("embedding")]
+
+    def create_series(
+        self,
+        series_id: str,
+        title: str,
+        tag_magazine: str,
+        tag_science: str,
+        tag_topic: str,
+    ) -> str:
+        """创建新系列，返回 series_id"""
+        self.execute(
+            """
+            INSERT INTO article_series (id, title, tag_magazine, tag_science, tag_topic)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (series_id, title, tag_magazine, tag_science, tag_topic),
+        )
+        logger.info(f"创建新系列: {series_id} - {title}")
+        return series_id
+
+    def add_to_series(
+        self,
+        article_id: str,
+        series_id: str,
+        series_order: int,
+    ) -> None:
+        """将文章加入系列"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE articles
+                        SET series_id = %s, series_order = %s
+                        WHERE id = %s
+                        """,
+                        (series_id, series_order, article_id),
+                    )
+        except Exception as e:
+            raise DatabaseError(f"加入系列失败: {e}") from e
+
+    def get_wp_post_id(self, article_id: str) -> int | None:
+        """获取文章的 WordPress post ID"""
+        row = self.fetch_one(
+            "SELECT wp_post_id FROM articles WHERE id = %s",
+            (article_id,),
+        )
+        return row["wp_post_id"] if row and row.get("wp_post_id") else None
+
+    def find_recent_similar_articles(
+        self,
+        tag_magazine: str,
+        tag_science: str,
+        tag_topic: str,
+        embedding: list[float],
+        lookback_days: int = 30,
+        threshold: float = 0.85,
+    ) -> list[dict]:
+        """
+        查找最近 N 天内同 top-3 标签且相似度高的文章。
+        用于判断是否应创建新系列。
+        """
+        sql = """
+            SELECT id, title, url, wp_post_id, series_id,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM articles
+            WHERE tag_magazine = %s AND tag_science = %s AND tag_topic = %s
+              AND series_id IS NULL
+              AND created_at >= NOW() - %s * INTERVAL '1 day'
+            ORDER BY embedding <=> %s::vector
+            LIMIT 5
+        """
+        try:
+            rows = self.fetch_all(
+                sql,
+                (
+                    str(embedding), tag_magazine, tag_science, tag_topic,
+                    lookback_days, str(embedding),
+                ),
+            )
+            return [r for r in rows if float(r["similarity"]) >= threshold]
+        except Exception as e:
+            logger.error(f"相似文章查询失败: {e}")
+            return []
 
     # ── 内部辅助 ──
 
