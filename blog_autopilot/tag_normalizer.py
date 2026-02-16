@@ -44,10 +44,3 @@ def normalize_synonym(tag: str) -> str:
     """将标签归一化为标准形式"""
     mapping = _load_synonyms()
     return mapping.get(tag, tag)
-
-
-def reload_synonyms() -> None:
-    """强制重新加载同义词映射"""
-    global _synonym_map
-    _synonym_map = None
-    _load_synonyms()

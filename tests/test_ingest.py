@@ -128,63 +128,6 @@ class TestIngestArticle:
         assert "数据库写入失败" in result.error
 
 
-class TestIngestBatch:
-
-    def test_batch_success(self, ingestor):
-        articles = [
-            {"content": "文章1内容" * 50},
-            {"content": "文章2内容" * 50},
-            {"content": "文章3内容" * 50},
-        ]
-        results = ingestor.ingest_batch(articles)
-        assert len(results) == 3
-        assert all(r.success for r in results)
-
-    def test_batch_partial_failure(self, ingestor):
-        """部分失败不影响后续"""
-        call_count = [0]
-        original_extract = ingestor._writer.extract_tags_and_promo
-
-        def extract_side_effect(content):
-            call_count[0] += 1
-            if call_count[0] == 2:
-                raise AIAPIError("第2篇失败")
-            return original_extract(content)
-
-        ingestor._writer.extract_tags_and_promo = MagicMock(
-            side_effect=extract_side_effect
-        )
-
-        articles = [
-            {"content": "文章1" * 50},
-            {"content": "文章2" * 50},
-            {"content": "文章3" * 50},
-        ]
-        results = ingestor.ingest_batch(articles)
-        assert len(results) == 3
-        assert results[0].success is True
-        assert results[1].success is False
-        assert results[2].success is True
-
-    def test_batch_empty_content(self, ingestor):
-        articles = [{"content": ""}]
-        results = ingestor.ingest_batch(articles)
-        assert len(results) == 1
-        assert results[0].success is False
-        assert "内容为空" in results[0].error
-
-    def test_batch_with_progress(self, ingestor):
-        progress_calls = []
-
-        def on_progress(current, total, result):
-            progress_calls.append((current, total))
-
-        articles = [{"content": "文章" * 50}]
-        ingestor.ingest_batch(articles, on_progress=on_progress)
-        assert len(progress_calls) == 1
-        assert progress_calls[0] == (1, 1)
-
-
 class TestIngestFromDirectory:
 
     def test_directory_scan(self, ingestor, tmp_path):

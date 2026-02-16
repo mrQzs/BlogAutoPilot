@@ -2,7 +2,6 @@
 
 import base64
 import logging
-import re
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -10,16 +9,16 @@ from openai import OpenAI
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_exponential, wait_fixed
 
 from blog_autopilot.config import AISettings, WordPressSettings
-from blog_autopilot.constants import COVER_IMAGE_INPUT_LIMIT
 from blog_autopilot.exceptions import CoverImageError
 
 logger = logging.getLogger("blog-autopilot")
 
-# 封面图生成提示词
+# 封面图生成提示词（仅基于标题，避免原文内容触发安全过滤）
 _COVER_IMAGE_PROMPT = (
-    "根据以下博客文章标题和内容摘要，生成一张适合作为博客封面图的图片。"
-    "要求：现代简洁风格，色彩鲜明，适合作为文章缩略图展示。"
-    "不要在图片中包含任何文字。"
+    "Generate a blog cover image inspired by the following title. "
+    "Style: modern, clean, minimalist with vibrant colors. "
+    "Use abstract shapes, gradients, or symbolic imagery to represent the topic. "
+    "Do NOT include any text, letters, words, or characters in the image."
 )
 
 
@@ -74,8 +73,7 @@ class CoverImageGenerator:
         返回 PNG 图片 bytes。
         抛出 CoverImageError 当生成失败时。
         """
-        plain = re.sub(r"<[^>]+>", "", html_body)[:COVER_IMAGE_INPUT_LIMIT]
-        prompt = f"{_COVER_IMAGE_PROMPT}\n\n标题：{title}\n\n内容摘要：{plain}"
+        prompt = f"{_COVER_IMAGE_PROMPT}\n\nTitle: {title}"
 
         try:
             client = self._get_client()

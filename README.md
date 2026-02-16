@@ -17,7 +17,7 @@
 - **内容去重** — Embedding 相似度检测，防止重复发布
 - **质量审核** — 三维度自动评分（一致性 / 可读性 / AI 痕迹），分类自适应阈值，审核结果入库
 - **SEO 优化** — 自动提取 meta description、slug、WordPress 标签，含搜索意图分类
-- **封面图生成** — AI 生成文章封面图并上传到 WordPress
+- **封面图生成** — AI 根据文章标题生成抽象风格封面图并上传到 WordPress
 - **HTML 安全清洗** — 发布前自动移除 XSS 风险内容（script/iframe/事件属性/javascript: 协议）
 - **系列检测** — 自动识别系列文章（向量 + LLM 辅助判断），注入上下篇导航链接
 - **模型回退** — 主模型不可用时自动切换备用模型，认证错误不重试
@@ -97,7 +97,7 @@ BlogAutoPilot/
 ├── file_bot.py              # Telegram Bot 文件接收 (独立进程)
 ├── categories.json          # 分类配置 + Bot 配置
 ├── tag_synonyms.json        # 标签同义词映射
-├── tests/                   # 测试 (266 个用例)
+├── tests/                   # 测试 (251 个用例)
 ├── input/                   # 待处理文件 (按分类放置)
 ├── processed/               # 已处理归档
 ├── drafts/                  # WordPress 发布失败时的草稿
@@ -166,6 +166,12 @@ AI_PROMO_MAX_TOKENS=10000
 AI_QUALITY_REVIEW_ENABLED=true
 AI_MODEL_REVIEWER=              # 空则回退到 AI_MODEL_PROMO
 AI_REVIEWER_MAX_TOKENS=4096
+
+# 封面图配置 (可选，默认启用，仅基于标题生成)
+AI_COVER_IMAGE_ENABLED=true
+AI_MODEL_COVER_IMAGE=dall-e-3
+AI_COVER_IMAGE_API_KEY=         # 可选，空则使用 AI_API_KEY
+AI_COVER_IMAGE_API_BASE=https://api.openai.com/v1
 
 # 数据库配置 (可选，不配置则关联系统禁用)
 DB_HOST=localhost
@@ -383,7 +389,7 @@ AI 会根据文件所在的大类目录自动选择对应的写作提示词。�
 ## 测试 / Testing
 
 ```bash
-# 运行全部测试 (266 个用例)
+# 运行全部测试 (251 个用例)
 pytest tests/ -v
 
 # 运行特定模块测试

@@ -284,25 +284,6 @@ class Database:
 
     # ── CRUD 操作 ──
 
-    def rebuild_vector_index(self) -> None:
-        """重建向量索引（数据量变化后调用以优化 lists 参数）"""
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM articles")
-                    n = cur.fetchone()[0]
-                    lists = max(10, min(1000, int(n ** 0.5))) if n > 0 else 100
-                    cur.execute("DROP INDEX IF EXISTS idx_articles_embedding")
-                    cur.execute(f"""
-                        CREATE INDEX idx_articles_embedding
-                        ON articles
-                        USING ivfflat (embedding vector_cosine_ops)
-                        WITH (lists = {lists})
-                    """)
-            logger.info(f"向量索引重建完成 (lists={lists}, articles={n})")
-        except Exception as e:
-            raise DatabaseError(f"向量索引重建失败: {e}") from e
-
     @staticmethod
     def _generate_id() -> str:
         """生成唯一文章 ID"""
@@ -367,55 +348,6 @@ class Database:
             "SELECT * FROM articles WHERE url = %s", (url,)
         )
         return self._row_to_record(row) if row else None
-
-    def update_article(self, article_id: str, **fields) -> bool:
-        """更新文章字段（支持部分更新）"""
-        if not fields:
-            return False
-
-        # 允许更新的字段白名单
-        allowed = {
-            "title", "tag_magazine", "tag_science", "tag_topic",
-            "tag_content", "tg_promo", "embedding", "url",
-            "series_id", "series_order", "wp_post_id",
-        }
-        update_fields = {k: v for k, v in fields.items() if k in allowed}
-        if not update_fields:
-            return False
-
-        set_clause = ", ".join(f"{k} = %s" for k in update_fields)
-        values = list(update_fields.values()) + [article_id]
-
-        sql = f"UPDATE articles SET {set_clause} WHERE id = %s"
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, values)
-                    return cur.rowcount > 0
-        except Exception as e:
-            raise DatabaseError(f"文章更新失败: {e}") from e
-
-    def delete_article(self, article_id: str) -> bool:
-        """删除文章记录"""
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM articles WHERE id = %s", (article_id,)
-                    )
-                    return cur.rowcount > 0
-        except Exception as e:
-            raise DatabaseError(f"文章删除失败: {e}") from e
-
-    def list_articles(
-        self, limit: int = 20, offset: int = 0
-    ) -> list[ArticleRecord]:
-        """分页列出文章"""
-        rows = self.fetch_all(
-            "SELECT * FROM articles ORDER BY created_at DESC LIMIT %s OFFSET %s",
-            (limit, offset),
-        )
-        return [self._row_to_record(r) for r in rows]
 
     def count_articles(self) -> int:
         """统计文章总数"""
@@ -786,30 +718,6 @@ class Database:
             ))
         except Exception as e:
             logger.warning(f"审核记录保存失败: {e}")
-
-    def get_review_stats(self, limit: int = 100) -> dict:
-        """获取审核统计数据（基于最近 limit 条记录）"""
-        rows = self.fetch_all(
-            """
-            WITH recent AS (
-                SELECT * FROM article_reviews
-                ORDER BY created_at DESC LIMIT %s
-            )
-            SELECT verdict, COUNT(*) as cnt,
-                   AVG(overall_score) as avg_score,
-                   AVG(consistency) as avg_consistency,
-                   AVG(readability) as avg_readability,
-                   AVG(ai_cliche) as avg_ai_cliche
-            FROM recent
-            GROUP BY verdict
-            ORDER BY cnt DESC
-            """,
-            (limit,),
-        )
-        return {
-            "by_verdict": rows,
-            "total": sum(r["cnt"] for r in rows),
-        }
 
     # ── 内部辅助 ──
 

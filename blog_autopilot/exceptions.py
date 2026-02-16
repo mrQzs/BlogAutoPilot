@@ -5,10 +5,6 @@ class BlogAutoPilotError(Exception):
     """基础异常"""
 
 
-class ConfigError(BlogAutoPilotError):
-    """配置错误（缺失环境变量、格式不合法等）"""
-
-
 class ExtractionError(BlogAutoPilotError):
     """文本提取失败"""
 
@@ -44,10 +40,6 @@ class EmbeddingError(BlogAutoPilotError):
 
 class TagExtractionError(BlogAutoPilotError):
     """标签提取异常"""
-
-
-class AssociationError(BlogAutoPilotError):
-    """关联查询异常"""
 
 
 class SEOExtractionError(BlogAutoPilotError):

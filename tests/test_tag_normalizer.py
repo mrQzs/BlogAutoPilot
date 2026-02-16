@@ -4,7 +4,7 @@ import json
 import pytest
 
 import blog_autopilot.tag_normalizer as mod
-from blog_autopilot.tag_normalizer import normalize_synonym, reload_synonyms
+from blog_autopilot.tag_normalizer import normalize_synonym
 
 
 class TestTagNormalizer:

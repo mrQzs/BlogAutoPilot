@@ -49,7 +49,6 @@ class AISettings(BaseSettings):
     promo_max_tokens: int = 10_000
     default_headers: dict[str, str] = {"User-Agent": "MyBlogWriter/1.0"}
     model_cover_image: str = "dall-e-3"
-    cover_image_max_tokens: int = 4096
     cover_image_enabled: bool = True
     cover_image_api_key: SecretStr | None = None
     cover_image_api_base: str = "https://api.dwyu.top/v1"

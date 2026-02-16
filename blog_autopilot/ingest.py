@@ -2,7 +2,6 @@
 
 import logging
 import os
-from collections.abc import Callable
 
 from blog_autopilot.ai_writer import AIWriter
 from blog_autopilot.config import Settings
@@ -115,56 +114,6 @@ class ArticleIngestor:
             tags=tags,
             success=True,
         )
-
-    def ingest_batch(
-        self,
-        articles: list[dict],
-        on_progress: Callable | None = None,
-    ) -> list[IngestionResult]:
-        """
-        批量入库多篇文章。
-
-        每条 dict 包含: content (必需), url (可选), id (可选)。
-        单篇失败不影响后续文章。
-        """
-        results: list[IngestionResult] = []
-        total = len(articles)
-
-        for i, article in enumerate(articles, 1):
-            content = article.get("content", "")
-            url = article.get("url")
-            article_id = article.get("id")
-
-            if not content:
-                result = IngestionResult(
-                    article_id=article_id or "",
-                    title="",
-                    error="内容为空",
-                    success=False,
-                )
-            else:
-                result = self.ingest_article(
-                    content=content, url=url, article_id=article_id
-                )
-
-            results.append(result)
-            logger.info(
-                f"批量入库进度: {i}/{total} | "
-                f"{'成功' if result.success else '失败'}"
-            )
-
-            if on_progress:
-                on_progress(i, total, result)
-
-        # 汇总报告
-        success_count = sum(1 for r in results if r.success)
-        fail_count = total - success_count
-        logger.info(
-            f"批量入库完成: 共 {total} 篇, "
-            f"成功 {success_count}, 失败 {fail_count}"
-        )
-
-        return results
 
     def ingest_from_directory(
         self, directory: str

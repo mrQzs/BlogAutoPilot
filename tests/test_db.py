@@ -123,86 +123,11 @@ class TestDatabaseCRUD:
             result = db.get_article_by_url("https://no.such.url")
             assert result is None
 
-    def test_update_article(self, db_settings):
-        db = Database(db_settings)
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        with patch.object(db, "get_connection") as mock_gc:
-            mock_gc.return_value.__enter__ = lambda s: mock_conn
-            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
-            result = db.update_article("test-001", title="新标题")
-            assert result is True
-
-    def test_update_article_no_fields(self, db_settings):
-        db = Database(db_settings)
-        result = db.update_article("test-001")
-        assert result is False
-
-    def test_update_article_invalid_fields(self, db_settings):
-        db = Database(db_settings)
-        result = db.update_article("test-001", invalid_field="value")
-        assert result is False
-
-    def test_delete_article_success(self, db_settings):
-        db = Database(db_settings)
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        with patch.object(db, "get_connection") as mock_gc:
-            mock_gc.return_value.__enter__ = lambda s: mock_conn
-            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
-            result = db.delete_article("test-001")
-            assert result is True
-
-    def test_delete_article_not_found(self, db_settings):
-        db = Database(db_settings)
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 0
-        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        with patch.object(db, "get_connection") as mock_gc:
-            mock_gc.return_value.__enter__ = lambda s: mock_conn
-            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
-            result = db.delete_article("nonexistent")
-            assert result is False
-
     def test_count_articles(self, db_settings):
         db = Database(db_settings)
 
         with patch.object(db, "fetch_one", return_value={"cnt": 42}):
             assert db.count_articles() == 42
-
-    def test_list_articles(self, db_settings):
-        db = Database(db_settings)
-        mock_rows = [
-            {
-                "id": f"art-{i}",
-                "title": f"文章{i}",
-                "tag_magazine": "技术周刊",
-                "tag_science": "AI",
-                "tag_topic": "测试",
-                "tag_content": "内容",
-                "tg_promo": "推广",
-                "embedding": None,
-                "url": None,
-                "created_at": None,
-            }
-            for i in range(3)
-        ]
-
-        with patch.object(db, "fetch_all", return_value=mock_rows):
-            result = db.list_articles(limit=10)
-            assert len(result) == 3
-            assert result[0].id == "art-0"
 
 
 class TestFindRelatedArticles:

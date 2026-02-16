@@ -53,7 +53,7 @@ blog_autopilot/
 ├── extractor.py       # 文本提取（PDF/MD/TXT）
 ├── db.py              # PostgreSQL + pgvector 数据库管理（含审核日志表 article_reviews）
 ├── embedding.py       # OpenAI Embedding API 客户端（LRU 缓存）
-├── ingest.py          # 文章入库工作流（批量/单文件）
+├── ingest.py          # 文章入库工作流（单文件/目录扫描）
 ├── recommender.py     # 智能选题推荐（标签缺口 + 向量稀疏分析）
 ├── series.py          # 文章系列检测（向量 + LLM 辅助）+ 导航 HTML 生成 + 回溯更新
 ├── tag_normalizer.py  # 标签同义词归一化（基于 tag_synonyms.json）
@@ -89,9 +89,10 @@ blog_autopilot/
 - **延迟初始化**：AIWriter 的 OpenAI client 在首次调用时才创建
 - **重试机制**：AI API (3次指数退避，认证错误不重试)、WordPress (2次固定5s，仅 retryable 异常)、Telegram (2次固定3s)
 - **模型回退**：主模型 3 次失败后自动切换备用模型（`AI_MODEL_WRITER_FALLBACK` / `AI_MODEL_PROMO_FALLBACK`），reviewer 回退到 promo fallback
-- **自定义异常**：BlogAutoPilotError 基类，各模块有专属异常类型（含 DatabaseError、EmbeddingError、TagExtractionError、AssociationError、QualityReviewError、RecommendationError、SeriesDetectionError）；WordPressError 含 `retryable` 标记和 `status_code`
+- **自定义异常**：BlogAutoPilotError 基类，各模块有专属异常类型（含 DatabaseError、EmbeddingError、TagExtractionError、QualityReviewError、RecommendationError、SeriesDetectionError）；WordPressError 含 `retryable` 标记和 `status_code`
 - **文章关联系统**（可选，依赖 DB）：四级标签体系（magazine/science/topic/content）+ 向量相似度搜索，两阶段检索（标签过滤 + embedding 排序）
 - **内容去重**：基于 embedding 相似度检测（阈值 0.95），防止重复发布
+- **封面图生成**（可选，默认启用）：基于文章标题生成抽象风格封面图（仅传标题给 DALL-E，避免原文内容触发安全过滤），上传到 WordPress 媒体库作为特色图片；失败不阻断发布
 - **标签同义词归一化**：`tag_normalizer.py` 基于 `tag_synonyms.json` 映射表，在标签提取后自动归一化（如 `AI应用` → `人工智能应用`），懒加载
 - **质量审核系统**（可选，默认启用）：三维度评分（consistency/readability/ai_cliche），加权综合分；分类自适应阈值（News 放宽 6/4，Paper/Books 收紧 8/6）；自动重写最多 2 次，失败存草稿；审核结果入库 `article_reviews` 表；审核异常降级发布
 - **分类专属提示词**：每个大类有独立的写作系统提示，支持带上下文和不带上下文两种模式；提示词含正反示例（tagger/review/seo）
@@ -161,6 +162,7 @@ pytest tests/ -v
 - `AI_API_KEY` / `AI_API_BASE` / `AI_MODEL_WRITER` / `AI_MODEL_PROMO` — AI API 端点和模型
 - `AI_MODEL_WRITER_FALLBACK` / `AI_MODEL_PROMO_FALLBACK` — 备用模型（可选，主模型失败时自动切换）
 - `AI_QUALITY_REVIEW_ENABLED` / `AI_MODEL_REVIEWER` / `AI_REVIEWER_MAX_TOKENS` — 质量审核（可选，默认启用）
+- `AI_COVER_IMAGE_ENABLED` / `AI_MODEL_COVER_IMAGE` / `AI_COVER_IMAGE_API_KEY` / `AI_COVER_IMAGE_API_BASE` — 封面图生成（可选，默认启用，仅基于标题生成）
 - `DB_URL` 或 `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` — PostgreSQL 数据库（可选，端口校验 1-65535）
 - `EMBEDDING_API_KEY` / `EMBEDDING_API_BASE` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Embedding API（可选，dimensions 必须正整数）
 - `SCHEDULE_PUBLISH_WINDOW_ENABLED` / `SCHEDULE_PUBLISH_WINDOW_START` / `SCHEDULE_PUBLISH_WINDOW_END` — 发布时段调度（可选，小时 0-23）
