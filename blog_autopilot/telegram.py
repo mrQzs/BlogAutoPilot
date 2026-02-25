@@ -20,6 +20,7 @@ def send_to_telegram(
     promo_text: str,
     link: str,
     settings: TelegramSettings,
+    bot_token_override: str | None = None,
 ) -> bool:
     """
     推送消息到 Telegram 频道。
@@ -37,7 +38,7 @@ def send_to_telegram(
 
     msg = f"{promo_text}\n\n👉 <b>阅读全文</b>: {link}"
 
-    token = settings.bot_token.get_secret_value()
+    token = bot_token_override or settings.bot_token.get_secret_value()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
     # 优先用 HTML（更宽容），解析失败则降级为纯文本

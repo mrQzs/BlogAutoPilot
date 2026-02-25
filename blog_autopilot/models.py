@@ -57,6 +57,7 @@ class CategoryMeta:
     subcategory_name: str
     category_id: int
     hashtag: str
+    tg_bot_token: str | None = None
 
 
 @dataclass(frozen=True)

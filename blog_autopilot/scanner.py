@@ -12,14 +12,33 @@ _CATEGORIES_FILE = os.path.join(
 )
 
 
-def _load_allowed_categories() -> tuple[str, ...]:
-    """从 categories.json 加载允许的大类，失败时回退到 constants"""
+def _load_categories_config() -> dict:
+    """从 categories.json 加载完整分类配置，失败时返回空字典"""
     try:
         with open(_CATEGORIES_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return tuple(k for k in data if not k.startswith("_"))
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return ALLOWED_CATEGORIES
+        return {}
+
+
+def _load_allowed_categories() -> tuple[str, ...]:
+    """从 categories.json 加载允许的大类，失败时回退到 constants"""
+    data = _load_categories_config()
+    if data:
+        return tuple(k for k in data if not k.startswith("_"))
+    return ALLOWED_CATEGORIES
+
+
+def _find_bot_token(category_name: str, subcategory_name: str) -> str | None:
+    """从 categories.json 查找分类对应的 bot_token"""
+    data = _load_categories_config()
+    subs = data.get(category_name)
+    if not isinstance(subs, list):
+        return None
+    for sub in subs:
+        if sub.get("name") == subcategory_name:
+            return sub.get("bot_token")
+    return None
 from blog_autopilot.models import CategoryMeta, FileTask
 
 logger = logging.getLogger("blog-autopilot")
@@ -70,12 +89,14 @@ def parse_directory_structure(
             return None
 
         hashtag = f"#{category_name}_{subcategory_name}"
+        tg_bot_token = _find_bot_token(category_name, subcategory_name)
 
         return CategoryMeta(
             category_name=category_name,
             subcategory_name=subcategory_name,
             category_id=category_id,
             hashtag=hashtag,
+            tg_bot_token=tg_bot_token,
         )
 
     except Exception as e:

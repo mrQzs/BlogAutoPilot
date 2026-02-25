@@ -434,9 +434,17 @@ class Pipeline:
             promo_text = self._writer.generate_promo(
                 article.title, article.html_body, hashtag=meta.hashtag
             )
-            send_to_telegram(promo_text, blog_link, self._settings.tg)
-        except (AIAPIError, TelegramError) as e:
-            logger.warning(f"推广失败（文章已发布）: {e}")
+        except (AIAPIError, AIResponseParseError) as e:
+            logger.warning(f"推广文案生成失败，回退简单通知: {e}")
+            promo_text = f"{meta.hashtag}\n\n📖 {article.title}"
+
+        try:
+            send_to_telegram(
+                promo_text, blog_link, self._settings.tg,
+                bot_token_override=meta.tg_bot_token,
+            )
+        except TelegramError as e:
+            logger.warning(f"Telegram 推送失败（文章已发布）: {e}")
 
         logger.info(f"{task.filename} 处理完成! -> {blog_link}")
         # Token 用量汇总

@@ -125,7 +125,7 @@ def upload_media_to_wordpress(
             media_url,
             headers=headers,
             data=image_data,
-            timeout=30,
+            timeout=60,
         )
         if resp.status_code == 201:
             media_id = resp.json().get("id")
