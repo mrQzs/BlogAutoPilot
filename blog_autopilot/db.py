@@ -258,6 +258,8 @@ class Database:
                     """)
                     if not cur.fetchone():
                         try:
+                            # 使用 SAVEPOINT 防止索引创建失败导致整个事务回滚
+                            cur.execute("SAVEPOINT before_vector_index")
                             # 动态计算 IVFFlat lists 参数
                             cur.execute("SELECT COUNT(*) FROM articles")
                             n = cur.fetchone()[0]
@@ -268,7 +270,10 @@ class Database:
                                 USING ivfflat (embedding vector_cosine_ops)
                                 WITH (lists = {lists})
                             """)
+                            cur.execute("RELEASE SAVEPOINT before_vector_index")
                         except Exception:
+                            # 回滚到 SAVEPOINT，恢复事务状态
+                            cur.execute("ROLLBACK TO SAVEPOINT before_vector_index")
                             # IVFFlat 索引要求表中已有足够数据，
                             # 数据不足时跳过，后续可手动创建
                             logger.warning(

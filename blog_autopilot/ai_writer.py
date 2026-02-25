@@ -567,6 +567,64 @@ class AIWriter:
 # ── 通用 JSON 解析 ──
 
 
+def _repair_truncated_json(text: str) -> str | None:
+    """
+    尝试修复被截断的 JSON 字符串。
+
+    常见场景：AI 输出被 max_tokens 截断，导致数组或字符串未闭合。
+    策略：截断到最后一个完整的值，然后补齐缺失的闭合符号。
+    """
+    # 去掉末尾不完整的字符串值（如 "有组织犯 被截断）
+    # 找到最后一个完整的引号对
+    cleaned = text.rstrip()
+
+    # 如果末尾是未闭合的字符串，截断到上一个完整的值
+    # 例如: ["a", "b", "未完成  →  ["a", "b"
+    last_quote = cleaned.rfind('"')
+    if last_quote > 0:
+        # 检查这个引号之后是否有 ] 或 }，如果没有说明被截断了
+        after = cleaned[last_quote + 1:].strip()
+        if after and after[0] not in ']},':
+            # 引号后面跟的不是闭合符，说明这个引号是值的开头，截断它
+            cleaned = cleaned[:last_quote].rstrip().rstrip(',')
+
+    # 统计未闭合的括号
+    stack = []
+    in_string = False
+    escape = False
+    for ch in cleaned:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in '{[':
+            stack.append(ch)
+        elif ch == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif ch == ']' and stack and stack[-1] == '[':
+            stack.pop()
+
+    if not stack:
+        return None  # 没有未闭合的括号，不需要修复
+
+    # 清理末尾的逗号（JSON 不允许 trailing comma）
+    cleaned = cleaned.rstrip().rstrip(',')
+
+    # 补齐闭合符号
+    closing = []
+    for opener in reversed(stack):
+        closing.append(']' if opener == '[' else '}')
+
+    return cleaned + ''.join(closing)
+
+
 def _parse_json_response(
     response_text: str,
     validate_fn,
@@ -596,12 +654,25 @@ def _parse_json_response(
     # 尝试 2: 提取 markdown 代码块
     code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if code_block:
+        inner = code_block.group(1).strip()
         try:
-            data = json.loads(code_block.group(1).strip())
+            data = json.loads(inner)
             validate_fn(data)
             return data
         except json.JSONDecodeError:
             pass
+        # 代码块内 JSON 可能被截断，尝试修复
+        cb_brace = inner.find("{")
+        if cb_brace != -1:
+            repaired = _repair_truncated_json(inner[cb_brace:])
+            if repaired:
+                try:
+                    data = json.loads(repaired)
+                    validate_fn(data)
+                    logger.warning("JSON 被截断（代码块内），已自动修复")
+                    return data
+                except (json.JSONDecodeError, AIResponseParseError):
+                    pass
 
     # 尝试 3: 提取 { ... } 子串
     first_brace = text.find("{")
@@ -613,6 +684,19 @@ def _parse_json_response(
             return data
         except json.JSONDecodeError:
             pass
+
+    # 尝试 4: 修复被截断的 JSON（AI 输出被 max_tokens 截断时常见）
+    if first_brace != -1:
+        truncated = text[first_brace:]
+        repaired = _repair_truncated_json(truncated)
+        if repaired:
+            try:
+                data = json.loads(repaired)
+                validate_fn(data)
+                logger.warning("JSON 被截断，已自动修复")
+                return data
+            except (json.JSONDecodeError, AIResponseParseError):
+                pass
 
     raise AIResponseParseError(
         f"{error_prefix}。响应内容前 200 字符: "

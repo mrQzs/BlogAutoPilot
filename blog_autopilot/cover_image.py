@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import re
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -114,9 +115,11 @@ def upload_media_to_wordpress(
     media_url = _get_media_url(settings.url)
     credentials = f"{settings.user}:{settings.app_password.get_secret_value()}"
     token = base64.b64encode(credentials.encode()).decode("utf-8")
+    # 文件名 ASCII 安全处理：非 ASCII 字符替换为下划线，避免 Content-Disposition header 编码失败
+    safe_filename = re.sub(r"[^\x00-\x7F]", "_", filename)
     headers = {
         "Authorization": f"Basic {token}",
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": f'attachment; filename="{safe_filename}"',
         "Content-Type": "image/png",
     }
 

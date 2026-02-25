@@ -71,6 +71,71 @@ def send_to_telegram(
     return False
 
 
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(3),
+    reraise=True,
+)
+def send_photo_to_telegram(
+    promo_text: str,
+    link: str,
+    image_data: bytes,
+    settings: TelegramSettings,
+    bot_token_override: str | None = None,
+) -> bool:
+    """
+    推送带封面图的消息到 Telegram 频道（sendPhoto）。
+
+    抛出 TelegramError 当推送失败时。
+    """
+    logger.info("正在推送带图片到 Telegram...")
+
+    if not promo_text:
+        promo_text = "新文章发布！"
+
+    promo_text = promo_text.replace(
+        "# 📌 Telegram 频道推广文案", ""
+    ).strip()
+
+    caption = f"{promo_text}\n\n👉 <b>阅读全文</b>: {link}"
+
+    # Telegram caption 上限 1024 字符
+    if len(caption) > 1024:
+        caption = caption[:1020] + "..."
+
+    token = bot_token_override or settings.bot_token.get_secret_value()
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+
+    for parse_mode in ("HTML", None):
+        data = {
+            "chat_id": settings.channel_id,
+            "caption": caption,
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+
+        files = {"photo": ("cover.png", image_data, "image/png")}
+
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=30)
+            result = resp.json()
+        except Exception as e:
+            raise TelegramError(f"Telegram 图片推送异常: {e}") from e
+
+        if result.get("ok"):
+            logger.info("Telegram 图片推送成功!")
+            return True
+
+        desc = result.get("description", "")
+        if "can't parse entities" in desc and parse_mode:
+            logger.warning(f"Telegram {parse_mode} 解析失败，降级为纯文本重试")
+            continue
+
+        raise TelegramError(f"Telegram 图片推送失败: {desc or '未知错误'}")
+
+    return False
+
+
 def test_tg_connection(settings: TelegramSettings) -> bool:
     """测试 Telegram Bot 连接"""
     logger.info("测试 Telegram Bot 连接...")
