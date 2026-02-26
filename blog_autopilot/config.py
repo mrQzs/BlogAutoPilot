@@ -47,21 +47,28 @@ class AISettings(BaseSettings):
     model_promo_fallback: str = ""
     writer_max_tokens: int = 200_000
     promo_max_tokens: int = 10_000
+    promo_api_key: SecretStr | None = None
+    promo_api_base: str = ""
     default_headers: dict[str, str] = {"User-Agent": "MyBlogWriter/1.0"}
     model_cover_image: str = "dall-e-3"
     cover_image_enabled: bool = True
     cover_image_api_key: SecretStr | None = None
     cover_image_api_base: str = "https://api.dwyu.top/v1"
+    cover_image_fallback_api_key: SecretStr | None = None
+    cover_image_fallback_api_base: str = ""
+    model_cover_image_fallback: str = ""
     quality_review_enabled: bool = True
     model_reviewer: str = ""
+    reviewer_api_key: SecretStr | None = None
+    reviewer_api_base: str = ""
     reviewer_max_tokens: int = 4096
     quality_pass_threshold: int = 7
     quality_rewrite_threshold: int = 5
 
-    @field_validator("api_base")
+    @field_validator("api_base", "promo_api_base", "reviewer_api_base", "cover_image_fallback_api_base")
     @classmethod
     def api_base_must_be_http(cls, v: str) -> str:
-        if not v.startswith(("http://", "https://")):
+        if v and not v.startswith(("http://", "https://")):
             raise ValueError("api_base must start with http:// or https://")
         return v
 
@@ -125,6 +132,39 @@ class EmbeddingSettings(BaseSettings):
         return v
 
 
+class SummaryQASettings(BaseSettings):
+    """摘要生成质量评估 API 配置"""
+    model_config = SettingsConfigDict(env_prefix="SUMMARY_QA_", extra="ignore")
+
+    enabled: bool = False
+    api_key: SecretStr = SecretStr("")
+    api_base: str = "https://api.example.com/v1"
+    model: str = ""
+    max_tokens: int = 4096
+    score_threshold: int = 7
+
+    @field_validator("api_base")
+    @classmethod
+    def api_base_must_be_http(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("api_base must start with http:// or https://")
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def max_tokens_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_tokens must be positive")
+        return v
+
+    @field_validator("score_threshold")
+    @classmethod
+    def score_threshold_must_be_valid(cls, v: int) -> int:
+        if not 1 <= v <= 10:
+            raise ValueError("score_threshold must be in range 1-10")
+        return v
+
+
 class ScheduleSettings(BaseSettings):
     """发布时段配置"""
     model_config = SettingsConfigDict(env_prefix="SCHEDULE_", extra="ignore")
@@ -159,6 +199,7 @@ class Settings:
         database: DatabaseSettings | None = None,
         embedding: EmbeddingSettings | None = None,
         schedule: ScheduleSettings | None = None,
+        summary_qa: SummaryQASettings | None = None,
     ) -> None:
         _env = ".env"
         self.wp = wp or WordPressSettings(_env_file=_env)
@@ -186,6 +227,13 @@ class Settings:
                 self.schedule = ScheduleSettings(_env_file=_env)
             except Exception:
                 self.schedule = ScheduleSettings()
+        if summary_qa is not None:
+            self.summary_qa = summary_qa
+        else:
+            try:
+                self.summary_qa = SummaryQASettings(_env_file=_env)
+            except Exception:
+                self.summary_qa = SummaryQASettings()
 
 
 @lru_cache(maxsize=1)

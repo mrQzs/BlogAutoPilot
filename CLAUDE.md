@@ -92,7 +92,7 @@ blog_autopilot/
 - **自定义异常**：BlogAutoPilotError 基类，各模块有专属异常类型（含 DatabaseError、EmbeddingError、TagExtractionError、QualityReviewError、RecommendationError、SeriesDetectionError）；WordPressError 含 `retryable` 标记和 `status_code`
 - **文章关联系统**（可选，依赖 DB）：四级标签体系（magazine/science/topic/content）+ 向量相似度搜索，两阶段检索（标签过滤 + embedding 排序）
 - **内容去重**：基于 embedding 相似度检测（阈值 0.95），防止重复发布
-- **封面图生成**（可选，默认启用）：基于文章标题生成抽象风格封面图（仅传标题给 DALL-E，避免原文内容触发安全过滤），上传到 WordPress 媒体库作为特色图片；失败不阻断发布
+- **封面图生成**（可选，默认启用）：基于文章标题生成抽象风格封面图（仅传标题给 DALL-E，避免原文内容触发安全过滤），上传到 WordPress 媒体库作为特色图片；主 API 走 chat completions 格式（适配 Gemini 等模型），3 次重试失败后自动切换备用 API（走 images.generate 格式）；备用模型从 `model_cover_image_fallback` 读取，未配置则沿用主模型；失败不阻断发布
 - **标签同义词归一化**：`tag_normalizer.py` 基于 `tag_synonyms.json` 映射表，在标签提取后自动归一化（如 `AI应用` → `人工智能应用`），懒加载
 - **质量审核系统**（可选，默认启用）：三维度评分（consistency/readability/ai_cliche），加权综合分；分类自适应阈值（News 放宽 6/4，Paper/Books 收紧 8/6）；自动重写最多 2 次，失败存草稿；审核结果入库 `article_reviews` 表；审核异常降级发布
 - **分类专属提示词**：每个大类有独立的写作系统提示，支持带上下文和不带上下文两种模式；提示词含正反示例（tagger/review/seo）
@@ -162,7 +162,8 @@ pytest tests/ -v
 - `AI_API_KEY` / `AI_API_BASE` / `AI_MODEL_WRITER` / `AI_MODEL_PROMO` — AI API 端点和模型
 - `AI_MODEL_WRITER_FALLBACK` / `AI_MODEL_PROMO_FALLBACK` — 备用模型（可选，主模型失败时自动切换）
 - `AI_QUALITY_REVIEW_ENABLED` / `AI_MODEL_REVIEWER` / `AI_REVIEWER_MAX_TOKENS` — 质量审核（可选，默认启用）
-- `AI_COVER_IMAGE_ENABLED` / `AI_MODEL_COVER_IMAGE` / `AI_COVER_IMAGE_API_KEY` / `AI_COVER_IMAGE_API_BASE` — 封面图生成（可选，默认启用，仅基于标题生成）
+- `AI_COVER_IMAGE_ENABLED` / `AI_MODEL_COVER_IMAGE` / `AI_COVER_IMAGE_API_KEY` / `AI_COVER_IMAGE_API_BASE` — 封面图生成（可选，默认启用，主 API 走 chat completions 格式）
+- `AI_COVER_IMAGE_FALLBACK_API_KEY` / `AI_COVER_IMAGE_FALLBACK_API_BASE` / `AI_MODEL_COVER_IMAGE_FALLBACK` — 备用封面图 API（可选，走 images.generate 格式，主 API 失败后自动切换）
 - `DB_URL` 或 `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` — PostgreSQL 数据库（可选，端口校验 1-65535）
 - `EMBEDDING_API_KEY` / `EMBEDDING_API_BASE` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Embedding API（可选，dimensions 必须正整数）
 - `SCHEDULE_PUBLISH_WINDOW_ENABLED` / `SCHEDULE_PUBLISH_WINDOW_START` / `SCHEDULE_PUBLISH_WINDOW_END` — 发布时段调度（可选，小时 0-23）
