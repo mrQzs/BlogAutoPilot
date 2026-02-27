@@ -28,6 +28,10 @@ TAG_MATCH_THRESHOLD = 2
 # 关联查询返回数量
 ASSOCIATION_TOP_K = 5
 
+# 关联文章时间衰减
+ASSOCIATION_RECENCY_WEIGHT = 0.2        # 时间衰减最大加成
+ASSOCIATION_RECENCY_WINDOW_DAYS = 365   # 衰减窗口（天）
+
 # TG 推广文案长度范围
 TG_PROMO_MIN_LENGTH = 150
 TG_PROMO_MAX_LENGTH = 250
@@ -47,6 +51,9 @@ RELATION_WEAK = "弱关联"
 # 内容去重相似度阈值（高于此值视为重复文章）
 DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 
+# 标题相似度去重警告阈值（Level 3: 标题相似 + 标签完全匹配）
+TITLE_SIMILARITY_THRESHOLD = 0.85
+
 # ── SEO 元数据常量 ──
 SEO_META_DESC_MIN_LENGTH = 120
 SEO_META_DESC_MAX_LENGTH = 160
@@ -56,16 +63,17 @@ SEO_WP_TAGS_MAX_COUNT = 8
 SEO_WP_TAG_MAX_LENGTH = 30
 SEO_INPUT_PREVIEW_LIMIT = 5000
 
-# ── 质量审核常量 ──
-QUALITY_WEIGHT_CONSISTENCY = 0.35
-QUALITY_WEIGHT_READABILITY = 0.30
-QUALITY_WEIGHT_AI_CLICHE = 0.35
+# ── 质量审核常量（4 维度） ──
+QUALITY_WEIGHT_CONSISTENCY = 0.25
+QUALITY_WEIGHT_FACTUALITY = 0.20
+QUALITY_WEIGHT_READABILITY = 0.25
+QUALITY_WEIGHT_AI_CLICHE = 0.30
 QUALITY_PASS_THRESHOLD = 7
 QUALITY_REWRITE_THRESHOLD = 5
 QUALITY_MAX_REWRITE_ATTEMPTS = 2
 QUALITY_INPUT_PREVIEW_LIMIT = 5000
 QUALITY_REQUIRED_FIELDS = (
-    "consistency", "readability", "ai_cliche", "issues", "summary",
+    "consistency", "factuality", "readability", "ai_cliche", "issues", "summary",
 )
 
 # ── 分类专属质量阈值 ──
@@ -107,6 +115,43 @@ SERIES_TITLE_PATTERN_THRESHOLD = 0.70
 SERIES_NEW_THRESHOLD = 0.85
 SERIES_LOOKBACK_DAYS = 30
 SERIES_NAV_CSS_CLASS = "blog-series-nav"
+# ── 审核反馈学习常量 ──
+REVIEW_CALIBRATION_SAMPLE_SIZE = 50    # 校准统计采样量
+REVIEW_EXEMPLAR_MIN_SCORE = 8         # 高质量示例最低综合分
+REVIEW_EXEMPLAR_COUNT = 3             # 注入写作提示词的示例数量
+
+# ── 套话动态检测库常量 ──
+CLICHE_MIN_REVIEWS = 5                # 最少审核记录数
+CLICHE_MIN_FREQUENCY = 2             # 套话最低出现次数（低于此值不入库）
+CLICHE_MAX_PHRASES = 50              # 套话库最大条目数
+CLICHE_INJECT_LIMIT = 30             # 注入提示词的最大套话数
+
+# ── 标签一致性检查常量 ──
+TAG_CONSISTENCY_NEIGHBORS = 5
+TAG_CONSISTENCY_WARN_THRESHOLD = 0.25
+
+# ── 标签治理审计常量 ──
+TAG_AUDIT_MIN_ARTICLES = 5
+TAG_AUDIT_SIMILARITY_THRESHOLD = 0.85
+TAG_AUDIT_TOP_COOCCURRENCES = 20
+TAG_AUDIT_MIN_TAG_COUNT = 3  # 模糊分组合并计数后，组总数 < 3 的不生成建议
+
+# ── 摘要生成常量 ──
+SUMMARY_INPUT_PREVIEW_LIMIT = 3000  # 摘要生成时截取的正文长度
+
+# ── 封面图分类风格 ──
+CATEGORY_COVER_STYLE: dict[str, str] = {
+    "News": "journalistic, bold, newspaper-inspired layout, strong contrast",
+    "Paper": "scientific, data visualization, clean academic, structured",
+    "Books": "literary, warm tones, reading atmosphere, soft lighting",
+    "Articles": "modern tech, gradient, geometric shapes, digital feel",
+    "Magazine": "editorial, vibrant, magazine cover inspired, dynamic composition",
+}
+DEFAULT_COVER_STYLE = (
+    "modern, clean, minimalist with vibrant colors, "
+    "abstract shapes, gradients, or symbolic imagery"
+)
+
 SERIES_TITLE_PATTERNS = (
     r"[Pp]art\s*\d+",
     r"第.{1,3}[部篇章节]",
@@ -114,3 +159,10 @@ SERIES_TITLE_PATTERNS = (
     r"系列|连载|[Ss]eries",
     r"[（(]\d+[）)]$",
 )
+
+# ── 综述文章生成常量 ──
+SURVEY_MIN_ARTICLES = 2           # 触发综述的最少文章数
+SURVEY_LOOKBACK_DAYS = 90         # 候选文章回溯天数
+SURVEY_MAX_SOURCE_ARTICLES = 8    # 综述最多引用的源文章数
+SURVEY_CHECK_INTERVAL = 24 * 3600  # 综述检查间隔（秒），默认 24 小时
+SURVEY_TOPIC_SIMILARITY = 0.80    # topic 模糊分组相似度阈值

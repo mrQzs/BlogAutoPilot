@@ -23,6 +23,7 @@ from blog_autopilot.publisher import PublishResult
 def _make_valid_review_json(**overrides) -> str:
     data = {
         "consistency": 8,
+        "factuality": 8,
         "readability": 7,
         "ai_cliche": 6,
         "issues": [
@@ -69,7 +70,7 @@ class TestValidateReview:
 
     def test_pass_verdict(self):
         data = json.loads(_make_valid_review_json(
-            consistency=9, readability=8, ai_cliche=8,
+            consistency=9, factuality=9, readability=8, ai_cliche=8,
         ))
         review = _validate_review(data)
         assert review.verdict == "pass"
@@ -77,7 +78,7 @@ class TestValidateReview:
 
     def test_rewrite_verdict(self):
         data = json.loads(_make_valid_review_json(
-            consistency=6, readability=6, ai_cliche=6,
+            consistency=6, factuality=6, readability=6, ai_cliche=6,
         ))
         review = _validate_review(data)
         assert review.verdict == "rewrite"
@@ -85,34 +86,34 @@ class TestValidateReview:
 
     def test_draft_verdict(self):
         data = json.loads(_make_valid_review_json(
-            consistency=3, readability=3, ai_cliche=3,
+            consistency=3, factuality=3, readability=3, ai_cliche=3,
         ))
         review = _validate_review(data)
         assert review.verdict == "draft"
         assert review.overall_score < 5
 
     def test_boundary_pass_at_7(self):
-        # 7*0.35 + 7*0.30 + 7*0.35 = 7.0 → pass
+        # 7*0.25 + 7*0.20 + 7*0.25 + 7*0.30 = 7.0 → pass
         data = json.loads(_make_valid_review_json(
-            consistency=7, readability=7, ai_cliche=7,
+            consistency=7, factuality=7, readability=7, ai_cliche=7,
         ))
         review = _validate_review(data)
         assert review.verdict == "pass"
         assert review.overall_score == 7
 
     def test_boundary_rewrite_at_5(self):
-        # 5*0.35 + 5*0.30 + 5*0.35 = 5.0 → rewrite
+        # 5*0.25 + 5*0.20 + 5*0.25 + 5*0.30 = 5.0 → rewrite
         data = json.loads(_make_valid_review_json(
-            consistency=5, readability=5, ai_cliche=5,
+            consistency=5, factuality=5, readability=5, ai_cliche=5,
         ))
         review = _validate_review(data)
         assert review.verdict == "rewrite"
         assert review.overall_score == 5
 
     def test_weighted_calculation(self):
-        # 10*0.35 + 10*0.30 + 10*0.35 = 10
+        # 10*0.25 + 10*0.20 + 10*0.25 + 10*0.30 = 10
         data = json.loads(_make_valid_review_json(
-            consistency=10, readability=10, ai_cliche=10,
+            consistency=10, factuality=10, readability=10, ai_cliche=10,
         ))
         review = _validate_review(data)
         assert review.overall_score == 10
@@ -154,6 +155,40 @@ class TestValidateReview:
         data = json.loads(_make_valid_review_json(summary=long_summary))
         review = _validate_review(data)
         assert len(review.summary) == 200
+
+    def test_factuality_score_affects_overall(self):
+        """factuality 低分拉低综合分"""
+        # high factuality: 8*0.25 + 9*0.20 + 8*0.25 + 8*0.30 = 8.2 → 8
+        data_high = json.loads(_make_valid_review_json(
+            consistency=8, factuality=9, readability=8, ai_cliche=8,
+        ))
+        review_high = _validate_review(data_high)
+
+        # low factuality: 8*0.25 + 3*0.20 + 8*0.25 + 8*0.30 = 7.0
+        data_low = json.loads(_make_valid_review_json(
+            consistency=8, factuality=3, readability=8, ai_cliche=8,
+        ))
+        review_low = _validate_review(data_low)
+
+        assert review_high.overall_score > review_low.overall_score
+
+    def test_factuality_missing_defaults_to_consistency(self):
+        """factuality 缺失时回退到 consistency 值"""
+        data = {
+            "consistency": 9,
+            "readability": 7,
+            "ai_cliche": 6,
+            "issues": [],
+            "summary": "测试",
+        }
+        review = _validate_review(data)
+        assert review.factuality_score == 9
+
+    def test_factuality_in_review_dataclass(self):
+        """QualityReview 包含 factuality_score 字段"""
+        data = json.loads(_make_valid_review_json(factuality=7))
+        review = _validate_review(data)
+        assert review.factuality_score == 7
 
 
 class TestFormatIssuesForRewrite:

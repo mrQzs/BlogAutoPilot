@@ -96,6 +96,7 @@ class QualityIssue:
 class QualityReview:
     """质量审核结果"""
     consistency_score: int     # 1-10
+    factuality_score: int      # 1-10
     readability_score: int     # 1-10
     ai_cliche_score: int       # 1-10
     overall_score: int         # 加权计算
@@ -136,6 +137,7 @@ class ArticleRecord:
     embedding: list[float] | None = None
     url: str | None = None
     created_at: datetime | None = None
+    summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,3 +204,57 @@ class SeriesInfo:
     order: int                          # 本文在系列中的位置 (1-based)
     total: int                          # 系列当前总篇数
     prev_article: ArticleRecord | None  # 上一篇
+
+
+# ── 标签治理审计数据模型 ──
+
+
+@dataclass(frozen=True)
+class TagStats:
+    """单个标签的频率统计"""
+    tag: str
+    level: str       # "magazine" | "science" | "topic" | "content"
+    count: int
+
+
+@dataclass(frozen=True)
+class CooccurrencePair:
+    """标签共现对"""
+    tag_a: str
+    tag_b: str
+    co_count: int
+
+
+@dataclass(frozen=True)
+class SynonymSuggestion:
+    """同义词合并建议"""
+    canonical: str       # 建议的标准标签（频率更高的）
+    synonym: str         # 建议合并的同义词
+    similarity: float    # embedding 余弦相似度
+    reason: str          # "embedding"
+    already_mapped: bool = False  # 是否已在 tag_synonyms.json 中
+
+
+@dataclass(frozen=True)
+class TagAuditReport:
+    """标签治理审计报告"""
+    article_count: int
+    unique_tag_count: int
+    tag_stats: tuple[TagStats, ...]
+    top_cooccurrences: tuple[CooccurrencePair, ...]
+    suggestions: tuple[SynonymSuggestion, ...]
+    embedding_available: bool
+
+
+# ── 综述文章数据模型 ──
+
+
+@dataclass(frozen=True)
+class SurveyResult:
+    """综述文章生成结果"""
+    title: str
+    html_body: str
+    source_count: int
+    tag_magazine: str
+    tag_science: str
+    tag_topic: str

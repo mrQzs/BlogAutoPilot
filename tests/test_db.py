@@ -238,6 +238,30 @@ class TestFindRelatedArticles:
             )
             assert results == []
 
+    def test_find_related_sql_includes_recency_params(self, db_settings, sample_tags):
+        """SQL 参数中包含时间衰减常量"""
+        from blog_autopilot.constants import (
+            ASSOCIATION_RECENCY_WEIGHT,
+            ASSOCIATION_RECENCY_WINDOW_DAYS,
+        )
+        db = Database(db_settings)
+
+        with patch.object(db, "fetch_all", return_value=[]) as mock_fetch:
+            db.find_related_articles(
+                tags=sample_tags,
+                embedding=[0.1] * 3072,
+                exclude_id="test-001",
+            )
+            mock_fetch.assert_called_once()
+            sql, params = mock_fetch.call_args[0]
+            # SQL 中应包含 recency 相关关键词
+            assert "recency_bonus" in sql
+            assert "GREATEST" in sql
+            # 参数中应包含衰减窗口和权重（各出现 2 次：SELECT + ORDER BY）
+            param_list = list(params)
+            assert param_list.count(ASSOCIATION_RECENCY_WINDOW_DAYS) == 2
+            assert param_list.count(ASSOCIATION_RECENCY_WEIGHT) == 2
+
     def test_generate_id(self):
         """ID 生成唯一性"""
         ids = {Database._generate_id() for _ in range(100)}

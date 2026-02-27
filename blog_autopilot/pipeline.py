@@ -14,6 +14,8 @@ from blog_autopilot.constants import (
     DUPLICATE_SIMILARITY_THRESHOLD,
     POLL_INTERVAL,
     QUALITY_MAX_REWRITE_ATTEMPTS,
+    SURVEY_CHECK_INTERVAL,
+    TAG_CONSISTENCY_WARN_THRESHOLD,
 )
 from blog_autopilot.exceptions import (
     AIAPIError,
@@ -23,6 +25,7 @@ from blog_autopilot.exceptions import (
     QualityReviewError,
     SEOExtractionError,
     SeriesDetectionError,
+    SurveyGenerationError,
     TelegramError,
     WordPressError,
 )
@@ -137,6 +140,21 @@ class Pipeline:
                 filename=task.filename, success=False, error=str(e)
             )
 
+        # ①.5 Level 1 去重：原文指纹精确匹配（零 API 成本）
+        source_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        if self._database:
+            dup_hash = self._database.find_duplicate_by_hash(source_hash)
+            if dup_hash:
+                logger.info(
+                    f"跳过重复内容: {task.filename} "
+                    f"(原文指纹匹配《{dup_hash['title']}》)"
+                )
+                return PipelineResult(
+                    filename=task.filename,
+                    success=False,
+                    error=f"内容重复(指纹): {dup_hash['title']}",
+                )
+
         # ② 关联查询（如果数据库可用）
         associations = None
         pre_tags = None
@@ -152,7 +170,7 @@ class Pipeline:
                     pre_tg_promo
                 )
 
-                # 内容去重：检查数据库中是否已有高度相似的文章
+                # Level 2 去重：embedding 相似度检查
                 dup = self._database.find_duplicate(
                     pre_embedding, DUPLICATE_SIMILARITY_THRESHOLD
                 )
@@ -167,6 +185,17 @@ class Pipeline:
                         error=f"内容重复: {dup['title']}",
                     )
 
+                # Level 3 去重：标题 + 标签完全匹配（仅警告，不阻断）
+                if pre_title:
+                    dup_title = self._database.find_similar_titles(
+                        pre_title, pre_tags,
+                    )
+                    if dup_title:
+                        logger.warning(
+                            f"疑似重复: {task.filename} 标题和标签与"
+                            f"《{dup_title['title']}》完全匹配，继续处理"
+                        )
+
                 associations = self._database.find_related_articles(
                     tags=pre_tags,
                     embedding=pre_embedding,
@@ -178,6 +207,29 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"关联查询失败，回退到原有模式: {e}")
                 associations = None
+
+        # ②.3 标签一致性检查 + AI 自动修正
+        if self._association_enabled and pre_tags and pre_embedding:
+            try:
+                from blog_autopilot.tag_governance import compute_tag_consistency
+                score, neighbor_tags = compute_tag_consistency(
+                    self._database, pre_tags, pre_embedding,
+                )
+                if score < TAG_CONSISTENCY_WARN_THRESHOLD:
+                    reviewed = self._writer.review_tags(
+                        pre_tags, neighbor_tags,
+                        pre_tg_promo or "",
+                    )
+                    if reviewed != pre_tags:
+                        logger.info(
+                            f"标签 AI 修正 ({score:.0%}): "
+                            f"{pre_tags} -> {reviewed}"
+                        )
+                        pre_tags = reviewed
+                else:
+                    logger.info(f"标签一致性: {score:.0%}")
+            except Exception as e:
+                logger.warning(f"标签一致性检查失败（不影响流水线）: {e}")
 
         # ②.5 系列检测（如果数据库可用）
         series_info = None
@@ -194,11 +246,49 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"系列检测异常（不影响发布）: {e}")
 
+        # ②.8 审核反馈学习：获取校准数据（如果数据库可用）
+        calibration_ctx = ""
+        exemplar_ctx = ""
+        if self._database:
+            try:
+                from blog_autopilot.review_analytics import (
+                    fetch_calibration,
+                    format_exemplar_context,
+                    format_review_calibration_context,
+                )
+                calibration = fetch_calibration(
+                    self._database, category_name=meta.category_name,
+                )
+                calibration_ctx = format_review_calibration_context(calibration)
+                exemplar_ctx = format_exemplar_context(calibration)
+                if calibration.has_stats:
+                    logger.info(
+                        f"审核校准已加载: {calibration.sample_count} 条记录, "
+                        f"平均分 {calibration.avg_overall}"
+                    )
+            except Exception as e:
+                logger.warning(f"审核校准数据加载失败（不影响处理）: {e}")
+
+        # ②.9 加载动态套话检测库
+        cliche_ctx = ""
+        try:
+            from blog_autopilot.cliche_library import (
+                format_cliche_context,
+                load_cliche_library,
+            )
+            cliche_entries = load_cliche_library()
+            if cliche_entries:
+                cliche_ctx = format_cliche_context(cliche_entries)
+                logger.info(f"套话库已加载: {len(cliche_entries)} 条")
+        except Exception as e:
+            logger.warning(f"套话库加载失败（不影响处理）: {e}")
+
         # ③ AI 生成文章（有关联时使用增强模式）
         try:
             article = self._writer.generate_blog_post_with_context(
                 raw_text, associations=associations,
                 category_name=meta.category_name,
+                exemplar_context=exemplar_ctx + cliche_ctx,
             )
         except (AIAPIError, AIResponseParseError) as e:
             logger.error(f"跳过 {task.filename}: AI 生成内容失败 - {e}")
@@ -216,6 +306,7 @@ class Pipeline:
                     article.title, article.html_body, raw_text,
                     pass_threshold=cat_thresholds[0] if cat_thresholds else None,
                     rewrite_threshold=cat_thresholds[1] if cat_thresholds else None,
+                    calibration_context=calibration_ctx + cliche_ctx,
                 )
                 # 审核结果入库
                 if self._database:
@@ -244,6 +335,7 @@ class Pipeline:
                         article.title, article.html_body, raw_text,
                         pass_threshold=cat_thresholds[0] if cat_thresholds else None,
                         rewrite_threshold=cat_thresholds[1] if cat_thresholds else None,
+                        calibration_context=calibration_ctx + cliche_ctx,
                     )
                     # 审核结果入库
                     if self._database:
@@ -288,7 +380,8 @@ class Pipeline:
                 from blog_autopilot.cover_image import upload_media_to_wordpress
 
                 image_data = self._cover_image_generator.generate_image(
-                    article.title, article.html_body
+                    article.title, article.html_body,
+                    category_name=meta.category_name,
                 )
                 slug = seo.slug if seo else task.filename.rsplit(".", 1)[0]
                 featured_media_id = upload_media_to_wordpress(
@@ -406,6 +499,15 @@ class Pipeline:
                 else:
                     tg_promo = pre_tg_promo
 
+                # 生成结构化摘要（失败不阻断入库）
+                summary = None
+                try:
+                    summary = self._writer.generate_summary(
+                        article.title, article.html_body,
+                    )
+                except Exception as e:
+                    logger.warning(f"摘要生成失败（不影响入库）: {e}")
+
                 record = ArticleRecord(
                     id=Database._generate_id(),
                     title=article.title,
@@ -413,12 +515,14 @@ class Pipeline:
                     tg_promo=tg_promo,
                     embedding=embedding,
                     url=blog_link,
+                    summary=summary,
                 )
                 self._database.insert_article(
                     record,
                     series_id=series_info.series_id if series_info else None,
                     series_order=series_info.order if series_info else None,
                     wp_post_id=wp_post_id,
+                    source_hash=source_hash,
                 )
                 logger.info(f"新文章已入库: {article.title}")
             except Exception as e:
@@ -426,7 +530,7 @@ class Pipeline:
                 self._save_failed_ingest(
                     article.title, blog_link, wp_post_id,
                     tags, embedding, tg_promo,
-                    series_info,
+                    series_info, source_hash,
                 )
 
         # ⑥ 推广
@@ -476,6 +580,7 @@ class Pipeline:
         embedding,
         tg_promo: str,
         series_info,
+        source_hash: str | None = None,
     ) -> None:
         """入库失败时保存记录，供后续重试"""
         failed_dir = os.path.join(
@@ -501,6 +606,8 @@ class Pipeline:
         if series_info:
             record["series_id"] = series_info.series_id
             record["series_order"] = series_info.order
+        if source_hash:
+            record["source_hash"] = source_hash
         # embedding 太大不存 JSON，重试时重新生成
 
         filename = hashlib.md5(title.encode()).hexdigest()[:12] + ".json"
@@ -565,6 +672,7 @@ class Pipeline:
                     series_id=record.get("series_id"),
                     series_order=record.get("series_order"),
                     wp_post_id=record.get("wp_post_id"),
+                    source_hash=record.get("source_hash"),
                 )
                 os.remove(fpath)
                 retried += 1
@@ -576,9 +684,9 @@ class Pipeline:
 
     def _get_archive_path(self, filepath: str) -> str:
         """根据 input 中的相对路径，计算 processed 中的对应路径"""
-        input_folder = self._settings.paths.input_folder
-        processed_dir = self._settings.paths.processed_folder
-        rel_path = os.path.relpath(filepath, input_folder)
+        input_folder = os.path.abspath(self._settings.paths.input_folder)
+        processed_dir = os.path.abspath(self._settings.paths.processed_folder)
+        rel_path = os.path.relpath(os.path.abspath(filepath), input_folder)
         return os.path.join(processed_dir, rel_path)
 
     def _archive_file(self, filepath: str) -> None:
@@ -642,6 +750,9 @@ class Pipeline:
                 elif result.error and result.error.startswith("内容重复"):
                     # 内容重复：直接删除源文件
                     os.remove(task.filepath)
+                elif result.error and "文件被锁定" in result.error:
+                    # 文件锁冲突：保留原文件，下次重试
+                    pass
                 else:
                     self._archive_file(task.filepath)
             except Exception as e:
@@ -672,6 +783,83 @@ class Pipeline:
                     input_folder, category, f"{sub['name']}_{sub['id']}"
                 )
                 os.makedirs(dir_path, exist_ok=True)
+
+    def _check_and_generate_surveys(self) -> None:
+        """检查并生成综述文章"""
+        if not self._association_enabled:
+            return
+        try:
+            from blog_autopilot.survey import SurveyGenerator
+
+            gen = SurveyGenerator(self._settings)
+            candidates = gen.detect_candidates()
+            if not candidates:
+                logger.info("综述检查: 未发现可生成综述的文章组")
+                return
+            logger.info(f"综述检查: 发现 {len(candidates)} 个候选组")
+            for candidate in candidates:
+                tag_topic = candidate.get("tag_topic", "")
+                # 去重：已生成过的跳过
+                if self._database.has_survey(tag_topic):
+                    logger.info(f"综述跳过 [{tag_topic}]: 已生成过")
+                    continue
+                try:
+                    self._generate_and_publish_survey(gen, candidate)
+                except Exception as e:
+                    logger.error(
+                        f"综述生成失败 [{tag_topic}]: {e}"
+                    )
+        except SurveyGenerationError as e:
+            logger.warning(f"综述检查跳过: {e}")
+        except Exception as e:
+            logger.error(f"综述检查异常: {e}", exc_info=True)
+
+    def _generate_and_publish_survey(
+        self, gen, candidate: dict
+    ) -> None:
+        """生成单篇综述并发布+推送"""
+        result = gen.generate(candidate)
+        logger.info(f"综述生成完成: {result.title} ({result.source_count} 篇源文章)")
+
+        # SEO 元数据
+        seo = None
+        wp_tag_ids = None
+        try:
+            seo = self._writer.extract_seo_metadata(
+                result.title, result.html_body
+            )
+            if seo.wp_tags:
+                wp_tag_ids = ensure_wp_tags(seo.wp_tags, self._settings.wp)
+        except Exception as e:
+            logger.warning(f"综述 SEO 提取失败: {e}")
+
+        # 发布到 WordPress Featured 分类 (ID 39)
+        pub = post_to_wordpress(
+            title=result.title,
+            content=result.html_body,
+            settings=self._settings.wp,
+            category_id=39,
+            excerpt=seo.meta_description if seo else None,
+            slug=seo.slug if seo else None,
+            tag_ids=wp_tag_ids,
+        )
+        logger.info(f"综述发布成功: {pub.url}")
+
+        # 记录综述到数据库（防止重复生成）
+        self._database.insert_survey(
+            tag_topic=candidate.get("tag_topic", ""),
+            title=result.title,
+            wp_post_id=pub.post_id,
+            source_count=result.source_count,
+        )
+
+        # 推广文案 + Telegram 推送
+        try:
+            promo = self._writer.generate_promo(result.title, result.html_body)
+            send_to_telegram(promo, self._settings.tg)
+            logger.info("综述推广推送成功")
+        except (TelegramError, AIAPIError) as e:
+            logger.warning(f"综述推广推送失败: {e}")
 
     def run(self, once: bool = False) -> None:
         """主循环入口"""
@@ -710,6 +898,7 @@ class Pipeline:
             logger.info(f"单次处理完成, 共处理 {count} 篇文章")
             return
 
+        last_survey_check = 0.0
         while True:
             try:
                 self.scan_and_process()
@@ -718,6 +907,12 @@ class Pipeline:
                 break
             except Exception as e:
                 logger.error(f"主循环异常: {e}", exc_info=True)
+
+            # 每 24 小时检查一次综述生成
+            now = time.time()
+            if now - last_survey_check >= SURVEY_CHECK_INTERVAL:
+                last_survey_check = now
+                self._check_and_generate_surveys()
 
             time.sleep(POLL_INTERVAL)
 

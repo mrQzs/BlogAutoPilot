@@ -40,6 +40,12 @@ def _load_synonyms() -> dict[str, str]:
     return _synonym_map
 
 
+def _invalidate_cache() -> None:
+    """清除同义词缓存，强制下次调用时重新加载"""
+    global _synonym_map
+    _synonym_map = None
+
+
 def normalize_synonym(tag: str) -> str:
     """将标签归一化为标准形式"""
     mapping = _load_synonyms()

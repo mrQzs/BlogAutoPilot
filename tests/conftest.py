@@ -103,6 +103,7 @@ def sample_association(sample_article_record):
 def sample_quality_review():
     return QualityReview(
         consistency_score=8,
+        factuality_score=8,
         readability_score=7,
         ai_cliche_score=6,
         overall_score=7,

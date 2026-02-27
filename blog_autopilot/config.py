@@ -243,10 +243,35 @@ def get_settings() -> Settings:
 
 
 def setup_logging() -> logging.Logger:
-    """配置并返回全局 logger"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+    """配置并返回全局 logger，同时输出到控制台和日志文件"""
+    import os
+    from logging.handlers import RotatingFileHandler
+
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "autopilot.log")
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    return logging.getLogger("blog-autopilot")
+
+    # 控制台 handler（保持原有行为）
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(fmt)
+
+    # 文件 handler（10MB 轮转，保留 5 个备份）
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(fmt)
+
+    logger = logging.getLogger("blog-autopilot")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(console)
+    logger.addHandler(file_handler)
+
+    return logger

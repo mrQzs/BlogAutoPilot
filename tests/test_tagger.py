@@ -305,6 +305,84 @@ class TestBuildRelationContext:
         assert text.count("链接:") == 1
 
 
+class TestBuildRelationContextMetadata:
+    """关联上下文包含标签、相似度、时间等元数据"""
+
+    def test_context_includes_tags(self):
+        """上下文包含四级标签信息"""
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="标签测试",
+                tags=TagSet("技术周刊", "AI应用", "API开发", "Claude自动化"),
+                tg_promo="推广文案",
+            ),
+            tag_match_count=4,
+            relation_level="强关联",
+            similarity=0.9,
+        )]
+
+        context = build_relation_context(articles)
+        text = context["strong_relations"]
+        assert "标签: 技术周刊 / AI应用 / API开发 / Claude自动化" in text
+
+    def test_context_includes_similarity(self):
+        """上下文包含相似度百分比"""
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="相似度测试",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广文案",
+            ),
+            tag_match_count=3,
+            relation_level="中关联",
+            similarity=0.8523,
+        )]
+
+        context = build_relation_context(articles)
+        text = context["medium_relations"]
+        assert "相似度: 85%" in text
+
+    def test_context_includes_created_at(self):
+        """有 created_at 时显示发布时间"""
+        from datetime import datetime, timezone
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="时间测试",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广文案",
+                created_at=datetime(2025, 6, 15, tzinfo=timezone.utc),
+            ),
+            tag_match_count=4,
+            relation_level="强关联",
+            similarity=0.9,
+        )]
+
+        context = build_relation_context(articles)
+        text = context["strong_relations"]
+        assert "发布时间: 2025-06-15" in text
+
+    def test_context_omits_created_at_when_none(self):
+        """created_at 为 None 时不显示发布时间"""
+        articles = [AssociationResult(
+            article=ArticleRecord(
+                id="art-1",
+                title="无时间",
+                tags=TagSet("周刊", "AI", "测试", "内容"),
+                tg_promo="推广文案",
+                created_at=None,
+            ),
+            tag_match_count=3,
+            relation_level="中关联",
+            similarity=0.8,
+        )]
+
+        context = build_relation_context(articles)
+        assert "发布时间" not in context["medium_relations"]
+
+
 class TestLogLinkCoverage:
 
     def test_logs_coverage_count(self, caplog):

@@ -172,7 +172,9 @@ class TestPipelineWithDatabase:
         mock_db = MagicMock()
         mock_emb = MagicMock()
         mock_emb.get_embedding.return_value = [0.1] * 3072
+        mock_db.find_duplicate_by_hash.return_value = None
         mock_db.find_duplicate.return_value = None
+        mock_db.find_similar_titles.return_value = None
         mock_db.find_related_articles.return_value = [
             AssociationResult(
                 article=ArticleRecord(
@@ -221,6 +223,7 @@ class TestPipelineWithDatabase:
 
         mock_db = MagicMock()
         mock_emb = MagicMock()
+        mock_db.find_duplicate_by_hash.return_value = None
         pipeline._database = mock_db
         pipeline._embedding_client = mock_emb
 
@@ -256,7 +259,9 @@ class TestPipelineWithDatabase:
         mock_db = MagicMock()
         mock_emb = MagicMock()
         mock_emb.get_embedding.return_value = [0.1] * 3072
+        mock_db.find_duplicate_by_hash.return_value = None
         mock_db.find_duplicate.return_value = None
+        mock_db.find_similar_titles.return_value = None
         mock_db.find_related_articles.return_value = []
         mock_db.insert_article.side_effect = Exception("入库失败")
 

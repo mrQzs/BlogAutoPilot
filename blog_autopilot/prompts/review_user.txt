@@ -6,4 +6,4 @@
 文章内容预览：
 {article_preview}
 
-请根据以上原始素材和生成的文章，从 consistency、readability、ai_cliche 三个维度进行评分，严格按照 JSON 格式输出。
+请根据以上原始素材和生成的文章，从 consistency、factuality、readability、ai_cliche 四个维度进行评分，严格按照 JSON 格式输出。

@@ -1,0 +1,15 @@
+请审核以下标签是否准确。
+
+══ 当前标签 ══
+一级 tag_magazine: {tag_magazine}
+二级 tag_science: {tag_science}
+三级 tag_topic: {tag_topic}
+四级 tag_content: {tag_content}
+
+══ 相似文章标签（数据库中最近邻） ══
+{neighbor_tags}
+
+══ 文章摘要 ══
+{article_summary}
+
+请根据文章内容和相似文章的标签惯例，判断当前标签是否需要修正。只输出 JSON。

@@ -67,6 +67,7 @@ class TestQualityReview:
     def test_creation(self):
         review = QualityReview(
             consistency_score=8,
+            factuality_score=8,
             readability_score=7,
             ai_cliche_score=6,
             overall_score=7,
@@ -85,6 +86,7 @@ class TestQualityReview:
         )
         review = QualityReview(
             consistency_score=5,
+            factuality_score=5,
             readability_score=5,
             ai_cliche_score=3,
             overall_score=4,

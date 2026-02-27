@@ -88,6 +88,88 @@ def main() -> None:
         print(recommender.format_output(recommendations))
         return
 
+    # --tag-audit: 标签治理审计
+    if "--tag-audit" in sys.argv:
+        settings = get_settings()
+        from blog_autopilot.tag_governance import TagAuditor
+        auditor = TagAuditor(settings)
+        report = auditor.audit()
+        print(auditor.format_output(report))
+        if "--json" in sys.argv:
+            print(auditor.export_json(report))
+        if "--auto-merge" in sys.argv:
+            merged = auditor.merge_suggestions(report)
+            if merged:
+                print(f"\n已自动合并 {len(merged)} 条同义词:")
+                for s in merged:
+                    print(f"  {s.synonym} -> {s.canonical} (相似度: {s.similarity:.4f})")
+            else:
+                print("\n无需合并的同义词建议")
+        return
+
+    # --update-cliches: 更新套话检测库
+    if "--update-cliches" in sys.argv:
+        settings = get_settings()
+        from blog_autopilot.cliche_library import ClicheUpdater
+        updater = ClicheUpdater(settings)
+        report = updater.update()
+        print(updater.format_output(report))
+        return
+
+    # --generate-survey: 综述文章生成 + 发布 + 推广
+    if "--generate-survey" in sys.argv:
+        settings = get_settings()
+        from blog_autopilot.survey import SurveyGenerator
+        from blog_autopilot.publisher import post_to_wordpress, ensure_wp_tags
+        from blog_autopilot.telegram import send_to_telegram
+        from blog_autopilot.ai_writer import AIWriter
+
+        gen = SurveyGenerator(settings)
+        candidates = gen.detect_candidates()
+        if not candidates:
+            print("未发现可生成综述的文章组")
+            return
+        print(gen.format_candidates(candidates))
+        result = gen.generate(candidates[0])
+        print(f"\n综述标题: {result.title}")
+        print(f"源文章数: {result.source_count}")
+
+        writer = AIWriter(settings.ai)
+
+        # SEO 元数据提取
+        seo = None
+        wp_tag_ids = None
+        try:
+            seo = writer.extract_seo_metadata(result.title, result.html_body)
+            if seo.wp_tags:
+                wp_tag_ids = ensure_wp_tags(seo.wp_tags, settings.wp)
+        except Exception as e:
+            logger.warning(f"SEO 提取失败（不影响发布）: {e}")
+
+        # 发布到 WordPress Featured 分类 (ID 39)
+        pub = post_to_wordpress(
+            title=result.title,
+            content=result.html_body,
+            settings=settings.wp,
+            category_id=39,
+            excerpt=seo.meta_description if seo else None,
+            slug=seo.slug if seo else None,
+            tag_ids=wp_tag_ids,
+        )
+        print(f"发布成功: {pub.url}")
+
+        # 推广文案 + Telegram 推送
+        try:
+            promo_text = writer.generate_promo(
+                result.title, result.html_body, hashtag="#综述"
+            )
+            send_to_telegram(promo_text, pub.url, settings.tg)
+            print("Telegram 推送完成")
+        except Exception as e:
+            logger.warning(f"推广/推送失败（文章已发布）: {e}")
+
+        return
+
     # --once / 默认: 正常运行流水线
     once_mode = "--once" in sys.argv
 

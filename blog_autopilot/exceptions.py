@@ -60,3 +60,15 @@ class RecommendationError(BlogAutoPilotError):
 
 class SeriesDetectionError(BlogAutoPilotError):
     """文章系列检测异常"""
+
+
+class TagAuditError(BlogAutoPilotError):
+    """标签治理审计异常"""
+
+
+class ClicheLibraryError(BlogAutoPilotError):
+    """套话库管理异常"""
+
+
+class SurveyGenerationError(BlogAutoPilotError):
+    """综述文章生成异常"""

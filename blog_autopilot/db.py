@@ -12,10 +12,15 @@ from pgvector.psycopg2 import register_vector
 
 from blog_autopilot.config import DatabaseSettings
 from blog_autopilot.constants import (
+    ASSOCIATION_RECENCY_WEIGHT,
+    ASSOCIATION_RECENCY_WINDOW_DAYS,
     ASSOCIATION_TOP_K,
     RELATION_MEDIUM,
     RELATION_STRONG,
     RELATION_WEAK,
+    SURVEY_LOOKBACK_DAYS,
+    SURVEY_MAX_SOURCE_ARTICLES,
+    SURVEY_MIN_ARTICLES,
     TAG_MATCH_THRESHOLD,
 )
 from blog_autopilot.exceptions import DatabaseError
@@ -226,6 +231,22 @@ class Database:
             )
             """,
 
+            # article_reviews 表新增 factuality 列（事实核查维度）
+            "ALTER TABLE article_reviews ADD COLUMN IF NOT EXISTS factuality INT",
+
+            # articles 表新增 source_hash 列（原文指纹去重）
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64)",
+
+            # source_hash 唯一索引（加速精确去重）
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_source_hash
+            ON articles (source_hash)
+            WHERE source_hash IS NOT NULL
+            """,
+
+            # articles 表新增 summary 列（结构化摘要，用于关联上下文增强）
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS summary TEXT",
+
             # 单列标签索引（加速关联查询预过滤）
             """
             CREATE INDEX IF NOT EXISTS idx_articles_tag_magazine
@@ -241,6 +262,22 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_articles_no_series
             ON articles (tag_magazine, tag_science, tag_topic, created_at DESC)
             WHERE series_id IS NULL
+            """,
+
+            # 综述文章记录表（防止重复生成）
+            """
+            CREATE TABLE IF NOT EXISTS article_surveys (
+                id              SERIAL PRIMARY KEY,
+                tag_topic       VARCHAR(100) NOT NULL,
+                title           VARCHAR(300),
+                wp_post_id      INT,
+                source_count    INT,
+                created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_surveys_tag_topic
+            ON article_surveys (tag_topic)
             """,
         ]
 
@@ -300,6 +337,7 @@ class Database:
         series_id: str | None = None,
         series_order: int | None = None,
         wp_post_id: int | None = None,
+        source_hash: str | None = None,
     ) -> str:
         """插入新文章记录，返回 article ID"""
         article_id = record.id or self._generate_id()
@@ -307,8 +345,9 @@ class Database:
         sql = """
             INSERT INTO articles
                 (id, title, tag_magazine, tag_science, tag_topic, tag_content,
-                 tg_promo, embedding, url, series_id, series_order, wp_post_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 tg_promo, embedding, url, series_id, series_order, wp_post_id,
+                 source_hash, summary)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             article_id,
@@ -323,6 +362,8 @@ class Database:
             series_id,
             series_order,
             wp_post_id,
+            source_hash,
+            record.summary,
         )
 
         try:
@@ -379,7 +420,7 @@ class Database:
         sql = """
             WITH candidates AS (
                 SELECT
-                    id, title, tg_promo, embedding, url, created_at,
+                    id, title, tg_promo, summary, embedding, url, created_at,
                     tag_magazine, tag_science, tag_topic, tag_content,
                     (
                         CASE WHEN tag_magazine = %s THEN 1 ELSE 0 END +
@@ -389,12 +430,10 @@ class Database:
                     ) AS tag_match_count
                 FROM articles
                 WHERE id != %s
-                  -- 预过滤：TAG_MATCH_THRESHOLD=2 时，至少需匹配 magazine 或 science 之一
-                  -- 注意：这会排除仅匹配 topic+content 的文章（极少见，可接受的性能权衡）
                   AND (tag_magazine = %s OR tag_science = %s)
             )
             SELECT
-                id, title, tg_promo, url, created_at,
+                id, title, tg_promo, summary, url, created_at,
                 tag_magazine, tag_science, tag_topic, tag_content,
                 tag_match_count,
                 CASE
@@ -402,10 +441,14 @@ class Database:
                     WHEN tag_match_count = 3 THEN %s
                     WHEN tag_match_count = 2 THEN %s
                 END AS relation_level,
-                1 - (embedding <=> %s::vector) AS similarity
+                1 - (embedding <=> %s::vector) AS similarity,
+                GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, NOW())))
+                    / 86400.0 / %s) * %s AS recency_bonus
             FROM candidates
             WHERE tag_match_count >= %s
-            ORDER BY embedding <=> %s::vector
+            ORDER BY (1 - (embedding <=> %s::vector))
+                * (1 + GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, NOW())))
+                    / 86400.0 / %s) * %s) DESC
             LIMIT %s
         """
 
@@ -421,8 +464,12 @@ class Database:
             RELATION_MEDIUM,
             RELATION_WEAK,
             str(embedding),
+            ASSOCIATION_RECENCY_WINDOW_DAYS,
+            ASSOCIATION_RECENCY_WEIGHT,
             TAG_MATCH_THRESHOLD,
             str(embedding),
+            ASSOCIATION_RECENCY_WINDOW_DAYS,
+            ASSOCIATION_RECENCY_WEIGHT,
             top_k,
         )
 
@@ -446,6 +493,7 @@ class Database:
                 tg_promo=row["tg_promo"],
                 url=row.get("url"),
                 created_at=row.get("created_at"),
+                summary=row.get("summary"),
             )
             results.append(AssociationResult(
                 article=article,
@@ -483,6 +531,67 @@ class Database:
         if row and float(row["similarity"]) >= threshold:
             return row
         return None
+
+    def find_duplicate_by_hash(self, source_hash: str) -> dict | None:
+        """
+        Level 1 去重：按原文 SHA256 精确匹配。
+
+        返回 {id, title, url} 或 None。
+        """
+        try:
+            return self.fetch_one(
+                "SELECT id, title, url FROM articles WHERE source_hash = %s",
+                (source_hash,),
+            )
+        except Exception as e:
+            logger.error(f"哈希去重查询失败: {e}")
+            return None
+
+    def find_similar_titles(
+        self,
+        title: str,
+        tags: TagSet,
+    ) -> dict | None:
+        """
+        Level 3 去重：标题模糊匹配 + 四级标签完全匹配。
+
+        使用 trigram 相似度（pg_trgm）或退化为 LIKE 前缀匹配。
+        返回 {id, title, url} 或 None。
+        """
+        sql = """
+            SELECT id, title, url
+            FROM articles
+            WHERE tag_magazine = %s
+              AND tag_science = %s
+              AND tag_topic = %s
+              AND tag_content = %s
+              AND title = %s
+            LIMIT 1
+        """
+        try:
+            return self.fetch_one(sql, (
+                tags.tag_magazine, tags.tag_science,
+                tags.tag_topic, tags.tag_content,
+                title,
+            ))
+        except Exception as e:
+            logger.error(f"标题去重查询失败: {e}")
+            return None
+
+    def find_nearest_by_embedding(
+        self, embedding: list[float], top_k: int = 5,
+    ) -> list[dict]:
+        """按 embedding 相似度查找最近邻文章的标签
+
+        Raises:
+            DatabaseError: 查询失败时向上抛出，不吞异常
+        """
+        sql = """
+            SELECT tag_magazine, tag_science, tag_topic, tag_content
+            FROM articles WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector LIMIT %s
+        """
+        return self.fetch_all(sql, (str(embedding), top_k))
 
     # ── 主题推荐查询 ──
 
@@ -705,14 +814,15 @@ class Database:
 
         sql = """
             INSERT INTO article_reviews
-                (article_title, consistency, readability, ai_cliche,
+                (article_title, consistency, factuality, readability, ai_cliche,
                  overall_score, verdict, issues_json, summary, category_name)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         try:
             self.execute(sql, (
                 article_title,
                 review.consistency_score,
+                review.factuality_score,
                 review.readability_score,
                 review.ai_cliche_score,
                 review.overall_score,
@@ -723,6 +833,233 @@ class Database:
             ))
         except Exception as e:
             logger.warning(f"审核记录保存失败: {e}")
+
+    # ── 审核分析查询 ──
+
+    def fetch_review_stats(
+        self,
+        category_name: str | None = None,
+        limit: int = 50,
+    ) -> dict | None:
+        """
+        获取审核评分统计（平均分、标准差、样本数）。
+
+        返回 dict: {count, avg_consistency, avg_readability, avg_ai_cliche,
+                     avg_overall, std_overall} 或 None（无数据时）
+        """
+        if category_name:
+            sql = """
+                SELECT
+                    COUNT(*)::int AS count,
+                    ROUND(AVG(consistency)::numeric, 1) AS avg_consistency,
+                    ROUND(AVG(readability)::numeric, 1) AS avg_readability,
+                    ROUND(AVG(ai_cliche)::numeric, 1) AS avg_ai_cliche,
+                    ROUND(AVG(overall_score)::numeric, 1) AS avg_overall,
+                    ROUND(STDDEV_POP(overall_score)::numeric, 2) AS std_overall
+                FROM (
+                    SELECT consistency, readability, ai_cliche, overall_score
+                    FROM article_reviews
+                    WHERE category_name = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                ) sub
+            """
+            params = (category_name, limit)
+        else:
+            sql = """
+                SELECT
+                    COUNT(*)::int AS count,
+                    ROUND(AVG(consistency)::numeric, 1) AS avg_consistency,
+                    ROUND(AVG(readability)::numeric, 1) AS avg_readability,
+                    ROUND(AVG(ai_cliche)::numeric, 1) AS avg_ai_cliche,
+                    ROUND(AVG(overall_score)::numeric, 1) AS avg_overall,
+                    ROUND(STDDEV_POP(overall_score)::numeric, 2) AS std_overall
+                FROM (
+                    SELECT consistency, readability, ai_cliche, overall_score
+                    FROM article_reviews
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                ) sub
+            """
+            params = (limit,)
+
+        try:
+            row = self.fetch_one(sql, params)
+            if row and row.get("count", 0) > 0:
+                return row
+            return None
+        except Exception as e:
+            logger.warning(f"审核统计查询失败: {e}")
+            return None
+
+    def fetch_high_score_articles(
+        self,
+        min_score: int = 8,
+        category_name: str | None = None,
+        limit: int = 3,
+    ) -> list[dict]:
+        """
+        获取高分文章标题和摘要，用作写作正面示例。
+
+        LEFT JOIN articles 表获取文章的结构化摘要（article_summary），
+        与审核评语（review_summary）分开返回。
+
+        返回 list[dict]: [{article_title, overall_score, summary,
+                           article_summary}]
+        """
+        if category_name:
+            sql = """
+                SELECT DISTINCT ON (r.article_title)
+                    r.article_title, r.overall_score, r.summary,
+                    a.summary AS article_summary
+                FROM article_reviews r
+                LEFT JOIN articles a ON a.title = r.article_title
+                WHERE r.overall_score >= %s AND r.category_name = %s
+                    AND r.verdict = 'pass'
+                ORDER BY r.article_title, r.overall_score DESC
+                LIMIT %s
+            """
+            params = (min_score, category_name, limit)
+        else:
+            sql = """
+                SELECT DISTINCT ON (r.article_title)
+                    r.article_title, r.overall_score, r.summary,
+                    a.summary AS article_summary
+                FROM article_reviews r
+                LEFT JOIN articles a ON a.title = r.article_title
+                WHERE r.overall_score >= %s AND r.verdict = 'pass'
+                ORDER BY r.article_title, r.overall_score DESC
+                LIMIT %s
+            """
+            params = (min_score, limit)
+
+        try:
+            return self.fetch_all(sql, params)
+        except Exception as e:
+            logger.warning(f"高分文章查询失败: {e}")
+            return []
+
+    def fetch_cliche_issues(self, limit: int = 200) -> list[dict]:
+        """
+        从 article_reviews 提取 ai_cliche 类别的问题描述。
+
+        返回 list[dict]: [{description, severity, category_name}]
+        """
+        sql = """
+            SELECT issues_json, category_name
+            FROM article_reviews
+            WHERE issues_json IS NOT NULL AND issues_json != '[]'
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        try:
+            rows = self.fetch_all(sql, (limit,))
+        except Exception as e:
+            logger.warning(f"套话问题查询失败: {e}")
+            return []
+
+        import json
+        results = []
+        for row in rows:
+            try:
+                issues = json.loads(row["issues_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for issue in issues:
+                if issue.get("category") == "ai_cliche":
+                    results.append({
+                        "description": issue.get("description", ""),
+                        "severity": issue.get("severity", "medium"),
+                        "category_name": row.get("category_name"),
+                    })
+        return results
+
+    # ── 综述文章候选查询 ──
+
+    def find_survey_candidates(
+        self,
+        min_articles: int = SURVEY_MIN_ARTICLES,
+        lookback_days: int = SURVEY_LOOKBACK_DAYS,
+    ) -> list[dict]:
+        """
+        检测可生成综述的文章组：按 (magazine, science, topic) 分组统计。
+        返回 [{tag_magazine, tag_science, tag_topic, article_count}]
+        """
+        sql = """
+            SELECT tag_magazine, tag_science, tag_topic,
+                   COUNT(*) AS article_count
+            FROM articles
+            WHERE created_at >= NOW() - %s * INTERVAL '1 day'
+            GROUP BY tag_magazine, tag_science, tag_topic
+            ORDER BY COUNT(*) DESC
+        """
+        try:
+            return self.fetch_all(sql, (lookback_days,))
+        except Exception as e:
+            logger.error(f"综述候选查询失败: {e}")
+            return []
+
+    def fetch_articles_by_tags(
+        self,
+        tag_magazine: str,
+        tag_science: str,
+        tag_topic: str | list[str],
+        limit: int = SURVEY_MAX_SOURCE_ARTICLES,
+    ) -> list[dict]:
+        """获取指定标签的文章，tag_topic 支持单个或多个"""
+        if isinstance(tag_topic, list):
+            placeholders = ",".join(["%s"] * len(tag_topic))
+            sql = f"""
+                SELECT id, title, summary, tg_promo, url, created_at
+                FROM articles
+                WHERE tag_magazine = %s AND tag_science = %s
+                  AND tag_topic IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT %s
+            """
+            params = (tag_magazine, tag_science, *tag_topic, limit)
+        else:
+            sql = """
+                SELECT id, title, summary, tg_promo, url, created_at
+                FROM articles
+                WHERE tag_magazine = %s AND tag_science = %s AND tag_topic = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+            """
+            params = (tag_magazine, tag_science, tag_topic, limit)
+        try:
+            return self.fetch_all(sql, params)
+        except Exception as e:
+            logger.error(f"按标签获取文章失败: {e}")
+            return []
+
+    def has_survey(self, tag_topic: str) -> bool:
+        """检查指定 tag_topic 是否已生成过综述"""
+        sql = "SELECT 1 FROM article_surveys WHERE tag_topic = %s LIMIT 1"
+        try:
+            rows = self.fetch_all(sql, (tag_topic,))
+            return len(rows) > 0
+        except Exception as e:
+            logger.error(f"综述去重查询失败: {e}")
+            return False
+
+    def insert_survey(
+        self,
+        tag_topic: str,
+        title: str | None = None,
+        wp_post_id: int | None = None,
+        source_count: int | None = None,
+    ) -> None:
+        """记录已生成的综述"""
+        sql = """
+            INSERT INTO article_surveys (tag_topic, title, wp_post_id, source_count)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (tag_topic) DO NOTHING
+        """
+        try:
+            self.execute(sql, (tag_topic, title, wp_post_id, source_count))
+        except Exception as e:
+            logger.error(f"综述记录插入失败: {e}")
 
     # ── 内部辅助 ──
 
@@ -742,4 +1079,5 @@ class Database:
             embedding=row.get("embedding"),
             url=row.get("url"),
             created_at=row.get("created_at"),
+            summary=row.get("summary"),
         )
