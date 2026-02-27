@@ -7,7 +7,12 @@ from blog_autopilot.ai.relation_context import build_relation_context, _log_link
 from blog_autopilot.ai.review import (
     _parse_review_response,
     _validate_review,
+    detect_self_review_bias,
+    format_dimensional_scores,
     format_issues_for_rewrite,
+    format_progressive_feedback,
+    format_self_review_warning,
+    identify_focus_areas,
 )
 from blog_autopilot.ai.sanitize import sanitize_input
 from blog_autopilot.ai.seo import _parse_seo_response, _validate_seo_metadata
@@ -15,6 +20,7 @@ from blog_autopilot.ai.tagger import (
     _parse_tagger_response,
     normalize_tag,
     validate_tags,
+    validate_tags_against_registry,
 )
 
 __all__ = [
@@ -30,8 +36,14 @@ __all__ = [
     "_validate_seo_metadata",
     "_warn_unclosed_tags",
     "build_relation_context",
+    "detect_self_review_bias",
+    "format_dimensional_scores",
     "format_issues_for_rewrite",
+    "format_progressive_feedback",
+    "format_self_review_warning",
+    "identify_focus_areas",
     "normalize_tag",
     "sanitize_input",
     "validate_tags",
+    "validate_tags_against_registry",
 ]

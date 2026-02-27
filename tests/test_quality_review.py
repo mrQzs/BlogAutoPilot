@@ -9,7 +9,12 @@ from blog_autopilot.ai_writer import (
     AIWriter,
     _parse_review_response,
     _validate_review,
+    detect_self_review_bias,
+    format_dimensional_scores,
     format_issues_for_rewrite,
+    format_progressive_feedback,
+    format_self_review_warning,
+    identify_focus_areas,
 )
 from blog_autopilot.exceptions import (
     AIAPIError,
@@ -507,3 +512,315 @@ class TestPipelineQualityReview:
         # 审核失败应降级继续发布
         assert result.success is True
         mock_wp.assert_called_once()
+
+
+# ── Part A: 自审偏差检测测试 ──
+
+
+class TestDetectSelfReviewBias:
+
+    def test_same_model_detected(self, ai_settings):
+        """writer 和 reviewer 使用相同模型时返回 True"""
+        ai_settings.model_reviewer = ai_settings.model_writer
+        assert detect_self_review_bias(ai_settings) is True
+
+    def test_different_model_not_detected(self, ai_settings):
+        """不同模型时返回 False"""
+        ai_settings.model_reviewer = "different-model"
+        assert detect_self_review_bias(ai_settings) is False
+
+    def test_empty_reviewer_fallback_to_promo(self, ai_settings):
+        """reviewer 为空时回退到 promo，与 writer 不同则无偏差"""
+        ai_settings.model_reviewer = ""
+        ai_settings.model_promo = "different-model"
+        assert detect_self_review_bias(ai_settings) is False
+
+    def test_empty_reviewer_same_as_writer(self, ai_settings):
+        """reviewer 为空时回退到 promo，promo == writer 则有偏差"""
+        ai_settings.model_reviewer = ""
+        ai_settings.model_promo = ai_settings.model_writer
+        assert detect_self_review_bias(ai_settings) is True
+
+    def test_same_model_different_api_base_no_bias(self, ai_settings):
+        """模型名相同但 API 端点不同时不视为自审"""
+        ai_settings.model_reviewer = ai_settings.model_writer
+        ai_settings.reviewer_api_base = "https://different-provider.api/v1"
+        assert detect_self_review_bias(ai_settings) is False
+
+    def test_same_model_different_api_key_no_bias(self, ai_settings):
+        """模型名和端点相同但 API key 不同时不视为自审"""
+        from pydantic import SecretStr
+        ai_settings.model_reviewer = ai_settings.model_writer
+        ai_settings.reviewer_api_key = SecretStr("different-key")
+        assert detect_self_review_bias(ai_settings) is False
+
+    def test_same_model_same_api_base_is_bias(self, ai_settings):
+        """模型名相同且端点相同时视为自审"""
+        ai_settings.model_reviewer = ai_settings.model_writer
+        # reviewer_api_base 为空时回退到 api_base，所以仍是同一端点
+        ai_settings.reviewer_api_base = ""
+        assert detect_self_review_bias(ai_settings) is True
+
+    def test_empty_string_api_key_treated_as_same(self, ai_settings):
+        """reviewer_api_key 为空字符串时视为未配置独立 key，仍检测为自审"""
+        from pydantic import SecretStr
+        ai_settings.model_reviewer = ai_settings.model_writer
+        ai_settings.reviewer_api_key = SecretStr("")
+        assert detect_self_review_bias(ai_settings) is True
+
+
+class TestFormatSelfReviewWarning:
+
+    def test_contains_warning_keywords(self):
+        warning = format_self_review_warning()
+        assert "自审偏差" in warning
+        assert "ai_cliche" in warning
+        assert "factuality" in warning
+
+    def test_not_empty(self):
+        assert len(format_self_review_warning()) > 50
+
+    def test_no_numeric_score_reduction(self):
+        """不应包含具体降分指令（阈值上调已处理）"""
+        warning = format_self_review_warning()
+        assert "降低 1-2 分" not in warning
+        assert "系统已自动上调" in warning
+
+
+class TestSelfReviewThresholdAdjustment:
+
+    def test_threshold_raised_when_self_review(self, ai_settings):
+        """自审偏差时阈值上调"""
+        ai_settings.model_reviewer = ai_settings.model_writer
+        writer = AIWriter(ai_settings)
+
+        # 综合分 7 — 正常情况下 pass，自审偏差时 threshold 升至 8 → rewrite
+        mock_response = _make_valid_review_json(
+            consistency=7, factuality=7, readability=7, ai_cliche=7,
+        )
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            review = writer.review_quality("标题", "<p>内容</p>", "素材")
+
+        # 默认 pass_threshold=7, self_review 上调 +1 → 8，综合分 7 < 8 → rewrite
+        assert review.verdict == "rewrite"
+
+    def test_no_adjustment_when_different_model(self, ai_settings):
+        """不同模型时不上调阈值"""
+        ai_settings.model_reviewer = "different-model"
+        writer = AIWriter(ai_settings)
+
+        mock_response = _make_valid_review_json(
+            consistency=7, factuality=7, readability=7, ai_cliche=7,
+        )
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            review = writer.review_quality("标题", "<p>内容</p>", "素材")
+
+        assert review.verdict == "pass"
+
+    def test_threshold_clamped_at_10(self, ai_settings):
+        """自审偏差阈值上调不超过 10"""
+        ai_settings.model_reviewer = ai_settings.model_writer
+        ai_settings.quality_pass_threshold = 10
+        ai_settings.quality_rewrite_threshold = 10
+        writer = AIWriter(ai_settings)
+
+        # 满分 10 应该仍能 pass（阈值不会变成 11）
+        mock_response = _make_valid_review_json(
+            consistency=10, factuality=10, readability=10, ai_cliche=10,
+        )
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            review = writer.review_quality("标题", "<p>内容</p>", "素材")
+
+        assert review.verdict == "pass"
+
+    def test_explicit_zero_threshold_not_overridden(self, ai_settings):
+        """传入 pass_threshold=0 时不会被 settings 默认值覆盖"""
+        ai_settings.model_reviewer = "different-model"
+        writer = AIWriter(ai_settings)
+
+        mock_response = _make_valid_review_json(
+            consistency=1, factuality=1, readability=1, ai_cliche=1,
+        )
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            # pass_threshold=0 意味着任何分数都能 pass
+            review = writer.review_quality(
+                "标题", "<p>内容</p>", "素材", pass_threshold=0,
+            )
+
+        assert review.verdict == "pass"
+
+
+# ── Part C: 增强重写反馈测试 ──
+
+
+class TestFormatDimensionalScores:
+
+    def test_contains_all_dimensions(self, sample_quality_review):
+        result = format_dimensional_scores(sample_quality_review)
+        assert "consistency" in result
+        assert "factuality" in result
+        assert "readability" in result
+        assert "ai_cliche" in result
+        assert "/10" in result
+
+    def test_contains_overall(self, sample_quality_review):
+        result = format_dimensional_scores(sample_quality_review)
+        assert "综合分" in result
+
+
+class TestIdentifyFocusAreas:
+
+    def test_returns_weakest_dimensions(self):
+        review = QualityReview(
+            consistency_score=9,
+            factuality_score=8,
+            readability_score=4,
+            ai_cliche_score=3,
+            overall_score=6,
+            verdict="rewrite",
+            issues=(),
+            summary="",
+        )
+        result = identify_focus_areas(review, top_n=2)
+        assert "ai_cliche" in result
+        assert "readability" in result
+        assert "需要重点改进" in result
+
+    def test_top_n_limits_output(self):
+        review = QualityReview(
+            consistency_score=5,
+            factuality_score=4,
+            readability_score=3,
+            ai_cliche_score=2,
+            overall_score=3,
+            verdict="draft",
+            issues=(),
+            summary="",
+        )
+        result = identify_focus_areas(review, top_n=1)
+        # 只返回最弱的 1 个维度
+        assert result.count("需要重点改进") == 1
+
+    def test_all_equal_scores_generic_message(self):
+        """所有维度分数相同时返回通用改进提示"""
+        review = QualityReview(
+            consistency_score=5,
+            factuality_score=5,
+            readability_score=5,
+            ai_cliche_score=5,
+            overall_score=5,
+            verdict="rewrite",
+            issues=(),
+            summary="",
+        )
+        result = identify_focus_areas(review)
+        assert "所有维度均为" in result
+        assert "5/10" in result
+        assert "需要重点改进" not in result
+
+    def test_tied_dimensions_mentioned(self):
+        """多维度同为最低分但超出 top_n 时提示同分维度"""
+        review = QualityReview(
+            consistency_score=3,
+            factuality_score=3,
+            readability_score=3,
+            ai_cliche_score=9,
+            overall_score=4,
+            verdict="draft",
+            issues=(),
+            summary="",
+        )
+        result = identify_focus_areas(review, top_n=2)
+        # top_n=2 显示 2 个最弱维度，但有 3 个维度同为 3 分
+        assert result.count("需要重点改进") == 2
+        assert "同分维度" in result
+
+    def test_no_tied_extras_when_all_shown(self):
+        """没有多余并列维度时不显示同分提示"""
+        review = QualityReview(
+            consistency_score=3,
+            factuality_score=4,
+            readability_score=7,
+            ai_cliche_score=8,
+            overall_score=5,
+            verdict="rewrite",
+            issues=(),
+            summary="",
+        )
+        result = identify_focus_areas(review, top_n=2)
+        assert "需要重点改进" in result
+        assert "同分维度" not in result
+
+
+class TestFormatProgressiveFeedback:
+
+    def test_no_previous_returns_empty(self, sample_quality_review):
+        result = format_progressive_feedback(sample_quality_review, None, 1)
+        assert result == ""
+
+    def test_attempt_1_returns_empty(self, sample_quality_review):
+        result = format_progressive_feedback(sample_quality_review, sample_quality_review, 1)
+        assert result == ""
+
+    def test_shows_comparison_on_second_attempt(self):
+        prev = QualityReview(
+            consistency_score=5, factuality_score=5, readability_score=5,
+            ai_cliche_score=5, overall_score=5, verdict="rewrite",
+            issues=(), summary="",
+        )
+        current = QualityReview(
+            consistency_score=7, factuality_score=6, readability_score=4,
+            ai_cliche_score=6, overall_score=6, verdict="rewrite",
+            issues=(), summary="",
+        )
+        result = format_progressive_feedback(current, prev, 2)
+        assert "第 2 次重写对比" in result
+        assert "+2" in result  # consistency improved
+        assert "退步" in result  # readability dropped
+
+    def test_marks_regressed_dimensions(self):
+        prev = QualityReview(
+            consistency_score=8, factuality_score=8, readability_score=8,
+            ai_cliche_score=8, overall_score=8, verdict="pass",
+            issues=(), summary="",
+        )
+        current = QualityReview(
+            consistency_score=6, factuality_score=7, readability_score=5,
+            ai_cliche_score=9, overall_score=7, verdict="pass",
+            issues=(), summary="",
+        )
+        result = format_progressive_feedback(current, prev, 2)
+        assert "退步维度" in result
+
+
+class TestRewriteWithEnhancedFeedback:
+
+    def test_rewrite_with_previous_review(self, ai_settings, sample_quality_review):
+        writer = AIWriter(ai_settings)
+        mock_response = "新标题\n<p>重写后的正文内容</p>"
+
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            result = writer.rewrite_with_feedback(
+                "旧标题", "<p>旧内容</p>", "原始素材",
+                sample_quality_review, category_name="Articles",
+                previous_review=sample_quality_review, attempt=2,
+                exemplar_context="示例文本",
+            )
+
+        assert result.title == "新标题"
+        assert "重写后的正文内容" in result.html_body
+
+    def test_rewrite_first_attempt_no_progressive(self, ai_settings, sample_quality_review):
+        writer = AIWriter(ai_settings)
+        mock_response = "新标题\n<p>重写后的正文内容</p>"
+
+        with patch.object(writer, "call_claude", return_value=mock_response) as mock_call:
+            writer.rewrite_with_feedback(
+                "旧标题", "<p>旧内容</p>", "原始素材",
+                sample_quality_review, category_name="Articles",
+                previous_review=None, attempt=1,
+            )
+            # Check the user prompt doesn't contain progressive feedback header
+            call_args = mock_call.call_args
+            user_prompt = call_args.kwargs.get("prompt", call_args.args[0] if call_args.args else "")
+            assert "重写对比" not in user_prompt

@@ -86,6 +86,7 @@ def sample_article_record(sample_tags):
         tg_promo="这是一段测试用的推广文案，长度足够用于测试。" * 5,
         embedding=[0.1] * 3072,
         url="https://test.blog/post-1",
+        content_excerpt="这是原文摘录内容，用于关联上下文回退。" * 5,
     )
 
 

@@ -40,8 +40,15 @@ def build_relation_context(
             entry += f"\n     相似度: {assoc.similarity:.0%}"
             if assoc.article.created_at:
                 entry += f"\n     发布时间: {assoc.article.created_at:%Y-%m-%d}"
-            # 优先使用结构化摘要，回退到 tg_promo
-            desc = assoc.article.summary or assoc.article.tg_promo
+            # 三级回退：summary → content_excerpt → tg_promo
+            if assoc.article.summary:
+                desc = f"[摘要] {assoc.article.summary}"
+            elif assoc.article.content_excerpt:
+                desc = f"[摘录] {assoc.article.content_excerpt}"
+            elif assoc.article.tg_promo:
+                desc = f"[推广] {assoc.article.tg_promo}"
+            else:
+                desc = f"[标题] {assoc.article.title}"
             entry += f"\n     {desc}"
             groups[level].append(entry)
 

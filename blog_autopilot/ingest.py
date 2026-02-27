@@ -14,6 +14,7 @@ from blog_autopilot.exceptions import (
     EmbeddingError,
     TagExtractionError,
 )
+from blog_autopilot.constants import CONTENT_EXCERPT_MAX_LENGTH
 from blog_autopilot.extractor import extract_text_from_file
 from blog_autopilot.models import ArticleRecord, IngestionResult, TagSet
 
@@ -92,6 +93,7 @@ class ArticleIngestor:
             tg_promo=tg_promo,
             embedding=embedding,
             url=url,
+            content_excerpt=content[:CONTENT_EXCERPT_MAX_LENGTH],
         )
 
         # Step 4: 写入数据库

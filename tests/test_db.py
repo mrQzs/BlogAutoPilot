@@ -100,6 +100,8 @@ class TestDatabaseCRUD:
             "embedding": [0.1] * 10,
             "url": "https://test.blog/1",
             "created_at": None,
+            "summary": None,
+            "content_excerpt": "原文摘录",
         }
 
         with patch.object(db, "fetch_one", return_value=mock_row):
@@ -141,6 +143,8 @@ class TestFindRelatedArticles:
                 "tg_promo": "推广1",
                 "url": None,
                 "created_at": None,
+                "summary": None,
+                "content_excerpt": "文章摘录1",
                 "tag_magazine": "技术周刊",
                 "tag_science": "AI应用",
                 "tag_topic": "API开发",
@@ -161,6 +165,7 @@ class TestFindRelatedArticles:
             assert results[0].tag_match_count == 3
             assert results[0].relation_level == "中关联"
             assert results[0].similarity == 0.85
+            assert results[0].article.content_excerpt == "文章摘录1"
 
     def test_find_related_empty(self, db_settings, sample_tags):
         db = Database(db_settings)
@@ -182,6 +187,8 @@ class TestFindRelatedArticles:
                 "tg_promo": "推广",
                 "url": None,
                 "created_at": None,
+                "summary": None,
+                "content_excerpt": None,
                 "tag_magazine": "技术周刊",
                 "tag_science": "AI应用",
                 "tag_topic": "API开发",
@@ -210,6 +217,8 @@ class TestFindRelatedArticles:
                 "tg_promo": "推广",
                 "url": None,
                 "created_at": None,
+                "summary": None,
+                "content_excerpt": None,
                 "tag_magazine": "技术周刊",
                 "tag_science": "其他领域",
                 "tag_topic": "其他主题",
@@ -262,7 +271,103 @@ class TestFindRelatedArticles:
             assert param_list.count(ASSOCIATION_RECENCY_WINDOW_DAYS) == 2
             assert param_list.count(ASSOCIATION_RECENCY_WEIGHT) == 2
 
+    def test_find_related_sql_includes_tag_topic_filter(self, db_settings, sample_tags):
+        """预过滤 SQL 包含 tag_topic 条件"""
+        db = Database(db_settings)
+
+        with patch.object(db, "fetch_all", return_value=[]) as mock_fetch:
+            db.find_related_articles(
+                tags=sample_tags,
+                embedding=[0.1] * 3072,
+                exclude_id="test-001",
+            )
+            sql, params = mock_fetch.call_args[0]
+            assert "OR tag_topic = %s" in sql
+            # tag_topic 应出现在参数中（tag_match_count 计算 + 预过滤）
+            param_list = list(params)
+            assert param_list.count(sample_tags.tag_topic) >= 2
+
     def test_generate_id(self):
         """ID 生成唯一性"""
         ids = {Database._generate_id() for _ in range(100)}
         assert len(ids) == 100
+
+
+class TestRowToRecord:
+
+    def test_row_to_record_with_content_excerpt(self):
+        """_row_to_record 正确读取 content_excerpt"""
+        row = {
+            "id": "rec-001",
+            "title": "测试",
+            "tag_magazine": "A",
+            "tag_science": "B",
+            "tag_topic": "C",
+            "tag_content": "D",
+            "tg_promo": "推广",
+            "embedding": None,
+            "url": None,
+            "created_at": None,
+            "summary": "摘要",
+            "content_excerpt": "原文摘录",
+        }
+        record = Database._row_to_record(row)
+        assert record.content_excerpt == "原文摘录"
+        assert record.summary == "摘要"
+
+    def test_row_to_record_without_content_excerpt(self):
+        """_row_to_record 缺少 content_excerpt 时为 None"""
+        row = {
+            "id": "rec-002",
+            "title": "测试",
+            "tag_magazine": "A",
+            "tag_science": "B",
+            "tag_topic": "C",
+            "tag_content": "D",
+            "tg_promo": "推广",
+            "embedding": None,
+            "url": None,
+            "created_at": None,
+        }
+        record = Database._row_to_record(row)
+        assert record.content_excerpt is None
+
+
+class TestSummaryBackfill:
+
+    def test_fetch_articles_without_summary(self, db_settings):
+        db = Database(db_settings)
+        mock_rows = [
+            {"id": "a1", "title": "文章1", "content_excerpt": "摘录1", "tg_promo": "推广1"},
+        ]
+
+        with patch.object(db, "fetch_all", return_value=mock_rows) as mock_fetch:
+            result = db.fetch_articles_without_summary(limit=10)
+            assert len(result) == 1
+            assert result[0]["id"] == "a1"
+            sql = mock_fetch.call_args[0][0]
+            assert "summary IS NULL" in sql
+
+    def test_fetch_articles_without_summary_error(self, db_settings):
+        db = Database(db_settings)
+
+        with patch.object(db, "fetch_all", side_effect=Exception("DB error")):
+            result = db.fetch_articles_without_summary()
+            assert result == []
+
+    def test_update_article_summary(self, db_settings):
+        db = Database(db_settings)
+
+        with patch.object(db, "execute") as mock_exec:
+            db.update_article_summary("a1", "新摘要")
+            mock_exec.assert_called_once()
+            sql, params = mock_exec.call_args[0]
+            assert "UPDATE articles SET summary" in sql
+            assert params == ("新摘要", "a1")
+
+    def test_update_article_summary_error(self, db_settings):
+        db = Database(db_settings)
+
+        with patch.object(db, "execute", side_effect=Exception("DB error")):
+            with pytest.raises(DatabaseError, match="更新摘要失败"):
+                db.update_article_summary("a1", "摘要")

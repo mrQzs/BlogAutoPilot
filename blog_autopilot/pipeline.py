@@ -11,6 +11,7 @@ import time
 from blog_autopilot.ai_writer import AIWriter
 from blog_autopilot.config import Settings
 from blog_autopilot.constants import (
+    CONTENT_EXCERPT_MAX_LENGTH,
     DUPLICATE_SIMILARITY_THRESHOLD,
     POLL_INTERVAL,
     QUALITY_MAX_REWRITE_ATTEMPTS,
@@ -251,6 +252,7 @@ class Pipeline:
         exemplar_ctx = ""
         if self._database:
             try:
+                from blog_autopilot.ai.review import detect_self_review_bias
                 from blog_autopilot.review_analytics import (
                     fetch_calibration,
                     format_exemplar_context,
@@ -259,7 +261,10 @@ class Pipeline:
                 calibration = fetch_calibration(
                     self._database, category_name=meta.category_name,
                 )
-                calibration_ctx = format_review_calibration_context(calibration)
+                is_self_review = detect_self_review_bias(self._settings.ai)
+                calibration_ctx = format_review_calibration_context(
+                    calibration, is_self_review=is_self_review,
+                )
                 exemplar_ctx = format_exemplar_context(calibration)
                 if calibration.has_stats:
                     logger.info(
@@ -273,10 +278,13 @@ class Pipeline:
         cliche_ctx = ""
         try:
             from blog_autopilot.cliche_library import (
+                auto_refresh_cliches,
                 format_cliche_context,
-                load_cliche_library,
+                load_merged_cliches,
             )
-            cliche_entries = load_cliche_library()
+            if self._database:
+                auto_refresh_cliches(self._settings, database=self._database)
+            cliche_entries = load_merged_cliches()
             if cliche_entries:
                 cliche_ctx = format_cliche_context(cliche_entries)
                 logger.info(f"套话库已加载: {len(cliche_entries)} 条")
@@ -322,6 +330,7 @@ class Pipeline:
                     )
 
                 rewrite_count = 0
+                previous_review = None
                 while review.verdict == "rewrite" and rewrite_count < QUALITY_MAX_REWRITE_ATTEMPTS:
                     rewrite_count += 1
                     logger.info(
@@ -330,7 +339,11 @@ class Pipeline:
                     article = self._writer.rewrite_with_feedback(
                         article.title, article.html_body, raw_text,
                         review, category_name=meta.category_name,
+                        previous_review=previous_review,
+                        attempt=rewrite_count,
+                        exemplar_context=exemplar_ctx,
                     )
+                    previous_review = review
                     review = self._writer.review_quality(
                         article.title, article.html_body, raw_text,
                         pass_threshold=cat_thresholds[0] if cat_thresholds else None,
@@ -368,10 +381,23 @@ class Pipeline:
             seo = self._writer.extract_seo_metadata(
                 article.title, article.html_body
             )
-            if seo.wp_tags:
-                wp_tag_ids = ensure_wp_tags(seo.wp_tags, self._settings.wp)
         except (AIAPIError, AIResponseParseError, SEOExtractionError) as e:
             logger.warning(f"SEO 提取失败（不影响发布）: {e}")
+
+        # ③.6 WordPress 标签创建（失败不阻断发布）
+        try:
+            all_wp_names = list(seo.wp_tags) if seo and seo.wp_tags else []
+            # 合并内部标签（wp_mapping=true）
+            if pre_tags:
+                from blog_autopilot.tag_registry import derive_wp_tags_from_internal
+                internal_wp_names = derive_wp_tags_from_internal(pre_tags)
+                for t in internal_wp_names:
+                    if t not in all_wp_names:
+                        all_wp_names.append(t)
+            if all_wp_names:
+                wp_tag_ids = ensure_wp_tags(tuple(all_wp_names), self._settings.wp)
+        except Exception as e:
+            logger.warning(f"WordPress 标签创建失败（不影响发布）: {e}")
 
         # ③.8 封面图生成+上传（失败不阻断发布）
         featured_media_id = None
@@ -516,6 +542,7 @@ class Pipeline:
                     embedding=embedding,
                     url=blog_link,
                     summary=summary,
+                    content_excerpt=raw_text[:CONTENT_EXCERPT_MAX_LENGTH],
                 )
                 self._database.insert_article(
                     record,
@@ -531,6 +558,8 @@ class Pipeline:
                     article.title, blog_link, wp_post_id,
                     tags, embedding, tg_promo,
                     series_info, source_hash,
+                    summary=summary,
+                    content_excerpt=raw_text[:CONTENT_EXCERPT_MAX_LENGTH],
                 )
 
         # ⑥ 推广
@@ -581,6 +610,8 @@ class Pipeline:
         tg_promo: str,
         series_info,
         source_hash: str | None = None,
+        summary: str | None = None,
+        content_excerpt: str | None = None,
     ) -> None:
         """入库失败时保存记录，供后续重试"""
         failed_dir = os.path.join(
@@ -608,6 +639,10 @@ class Pipeline:
             record["series_order"] = series_info.order
         if source_hash:
             record["source_hash"] = source_hash
+        if summary:
+            record["summary"] = summary
+        if content_excerpt:
+            record["content_excerpt"] = content_excerpt
         # embedding 太大不存 JSON，重试时重新生成
 
         filename = hashlib.md5(title.encode()).hexdigest()[:12] + ".json"
@@ -666,6 +701,8 @@ class Pipeline:
                     tg_promo=tg_promo,
                     embedding=embedding,
                     url=record.get("url"),
+                    summary=record.get("summary"),
+                    content_excerpt=record.get("content_excerpt"),
                 )
                 self._database.insert_article(
                     article_record,

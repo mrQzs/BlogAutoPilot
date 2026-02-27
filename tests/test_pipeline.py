@@ -274,3 +274,60 @@ class TestPipelineWithDatabase:
         # 即使入库失败，文章仍然发布成功
         assert result.success is True
         assert result.blog_link == "https://test.wp/post-1"
+
+    @patch("blog_autopilot.pipeline.send_to_telegram")
+    @patch("blog_autopilot.pipeline.post_to_wordpress")
+    @patch("blog_autopilot.pipeline.ensure_wp_tags")
+    def test_internal_tags_merged_into_wp_tags(
+        self, mock_ensure_tags, mock_wp, mock_tg, test_settings, sample_task
+    ):
+        """内部标签（wp_mapping=true）被合并到 WordPress 标签"""
+        from blog_autopilot.models import SEOMetadata
+        mock_wp.return_value = PublishResult(url="https://test.wp/post-1", post_id=1)
+        mock_ensure_tags.return_value = [1, 2, 3, 4]
+
+        pipeline = Pipeline(test_settings)
+        mock_article = ArticleResult(
+            title="WP桥接测试", html_body="<p>正文</p>"
+        )
+        seo = SEOMetadata(
+            meta_description="描述" * 20,
+            slug="test-slug",
+            wp_tags=("关键词A", "关键词B"),
+        )
+        pipeline._writer = MagicMock()
+        pipeline._writer.generate_blog_post_with_context.return_value = mock_article
+        pipeline._writer.generate_promo.return_value = "推广文案"
+        pipeline._writer.extract_tags_and_promo.return_value = (
+            TagSet("技术周刊", "AI应用", "API开发", "自动化"),
+            "推广文案内容",
+            "提取标题",
+        )
+        pipeline._writer.extract_seo_metadata.return_value = seo
+
+        # Mock 数据库和 Embedding
+        mock_db = MagicMock()
+        mock_emb = MagicMock()
+        mock_emb.get_embedding.return_value = [0.1] * 3072
+        mock_db.find_duplicate_by_hash.return_value = None
+        mock_db.find_duplicate.return_value = None
+        mock_db.find_similar_titles.return_value = None
+        mock_db.find_related_articles.return_value = []
+        mock_db.insert_article.return_value = "new-001"
+
+        pipeline._database = mock_db
+        pipeline._embedding_client = mock_emb
+        pipeline._ingestor = MagicMock()
+
+        result = pipeline.process_file(sample_task)
+
+        assert result.success is True
+        # ensure_wp_tags 应该被调用，参数包含 SEO tags + 内部 wp_mapping tags
+        mock_ensure_tags.assert_called_once()
+        called_tags = mock_ensure_tags.call_args[0][0]
+        # SEO tags
+        assert "关键词A" in called_tags
+        assert "关键词B" in called_tags
+        # 内部 tag_magazine 和 tag_science 有 wp_mapping=true
+        assert "技术周刊" in called_tags
+        assert "AI应用" in called_tags

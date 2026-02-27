@@ -1,14 +1,18 @@
 """套话动态检测库 — 从历史审核数据中提取 AI 套话，生成检测库"""
 
+import fcntl
 import json
 import logging
+import os
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 from blog_autopilot.config import Settings
 from blog_autopilot.constants import (
+    CLICHE_AUTO_REFRESH_HOURS,
     CLICHE_INJECT_LIMIT,
     CLICHE_MAX_PHRASES,
     CLICHE_MIN_FREQUENCY,
@@ -20,6 +24,9 @@ logger = logging.getLogger("blog-autopilot")
 
 # 套话库文件路径（项目根目录）
 CLICHE_FILE = Path(__file__).parent.parent / "ai_cliches.json"
+
+# 基础套话库文件路径（项目根目录）
+BASELINE_FILE = Path(__file__).parent.parent / "cliche_baseline.json"
 
 # 从 description 中提取引号内套话短语的正则
 _PHRASE_RE = re.compile("[「『\u201c\u2018](.*?)[」』\u201d\u2019]")
@@ -93,20 +100,24 @@ def save_cliche_library(entries: list[ClicheEntry], path: Path = CLICHE_FILE) ->
 
 
 def load_cliche_library(path: Path = CLICHE_FILE) -> list[ClicheEntry]:
-    """从 JSON 文件加载套话库，文件不存在时返回空列表"""
+    """从 JSON 文件加载套话库，文件不存在时返回空列表，跳过格式错误的条目"""
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [
-            ClicheEntry(
-                phrase=item["phrase"],
-                frequency=item["frequency"],
-                severity=item["severity"],
-            )
-            for item in data
-            if isinstance(item, dict) and "phrase" in item
-        ]
+        entries = []
+        for item in data:
+            if not isinstance(item, dict) or "phrase" not in item:
+                continue
+            try:
+                entries.append(ClicheEntry(
+                    phrase=item["phrase"],
+                    frequency=int(item.get("frequency", 0)),
+                    severity=item.get("severity", "medium"),
+                ))
+            except (TypeError, ValueError) as e:
+                logger.warning(f"跳过格式错误的套话条目 {item!r}: {e}")
+        return entries
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning(f"套话库文件解析失败: {e}")
         return []
@@ -133,12 +144,124 @@ def format_cliche_context(entries: list[ClicheEntry]) -> str:
     return "\n".join(lines)
 
 
+# ── Part D: 基础套话库 + 合并 + 自动刷新 ──
+
+
+def load_baseline_cliches(path: Path = BASELINE_FILE) -> list[ClicheEntry]:
+    """加载基础套话库（frequency=0），文件不存在时返回空列表，跳过格式错误的条目"""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = []
+        for item in data:
+            if not isinstance(item, dict) or "phrase" not in item:
+                continue
+            try:
+                entries.append(ClicheEntry(
+                    phrase=str(item["phrase"]),
+                    frequency=0,
+                    severity=str(item.get("severity", "medium")),
+                ))
+            except (TypeError, ValueError) as e:
+                logger.warning(f"跳过格式错误的基础套话条目 {item!r}: {e}")
+        return entries
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"基础套话库文件解析失败: {e}")
+        return []
+
+
+def load_merged_cliches(
+    dynamic_path: Path = CLICHE_FILE,
+    baseline_path: Path = BASELINE_FILE,
+) -> list[ClicheEntry]:
+    """
+    合并基础+动态套话库，动态条目优先（按 phrase 去重）。
+
+    返回按频率降序排列的列表（动态高频在前，基础库 frequency=0 在末尾）。
+    """
+    dynamic = load_cliche_library(path=dynamic_path)
+    baseline = load_baseline_cliches(path=baseline_path)
+
+    # 动态条目优先
+    seen = {e.phrase for e in dynamic}
+    merged = list(dynamic)
+    for entry in baseline:
+        if entry.phrase not in seen:
+            merged.append(entry)
+            seen.add(entry.phrase)
+
+    # 按频率降序排列，相同频率按 phrase 稳定排序
+    merged.sort(key=lambda e: (-e.frequency, e.phrase))
+
+    return merged
+
+
+def is_cliche_stale(path: Path = CLICHE_FILE, max_age_hours: int = CLICHE_AUTO_REFRESH_HOURS) -> bool:
+    """检查动态套话库是否过期（文件不存在也视为过期）"""
+    if not path.exists():
+        return True
+    try:
+        mtime = path.stat().st_mtime
+        age_hours = (time.time() - mtime) / 3600
+        return age_hours >= max_age_hours
+    except OSError:
+        return True
+
+
+def auto_refresh_cliches(settings: Settings, database=None) -> None:
+    """
+    过期且 DB 可用时自动刷新动态套话库，静默失败。
+
+    使用文件锁防止多进程并发刷新。
+
+    Args:
+        database: 可选的现有 Database 实例，避免创建冗余连接。
+    """
+    if not is_cliche_stale():
+        return
+
+    lock_path = CLICHE_FILE.parent / ".cliche_refresh.lock"
+    try:
+        lock_fd = open(lock_path, "a")
+    except OSError:
+        logger.debug("套话库自动刷新: 无法创建锁文件，跳过")
+        return
+
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        lock_fd.close()
+        logger.debug("套话库自动刷新: 其他进程正在刷新，跳过")
+        return
+
+    try:
+        # 获得锁后再次检查是否过期（可能另一进程刚刷新完）
+        if not is_cliche_stale():
+            return
+        updater = ClicheUpdater(settings, database=database)
+        report = updater.update()
+        logger.info(
+            f"套话库自动刷新完成: {report.unique_phrases} 条套话"
+        )
+    except ClicheLibraryError as e:
+        logger.debug(f"套话库自动刷新跳过: {e}")
+    except Exception as e:
+        logger.debug(f"套话库自动刷新失败: {e}")
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+
+
 class ClicheUpdater:
     """套话库更新器，从数据库审核记录中提取并更新套话库"""
 
-    def __init__(self, settings: Settings) -> None:
-        from blog_autopilot.db import Database
-        self._database = Database(settings.database)
+    def __init__(self, settings: Settings, database=None) -> None:
+        if database is not None:
+            self._database = database
+        else:
+            from blog_autopilot.db import Database
+            self._database = Database(settings.database)
 
     def update(self) -> ClicheReport:
         """

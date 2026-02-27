@@ -29,8 +29,8 @@ TAG_MATCH_THRESHOLD = 2
 ASSOCIATION_TOP_K = 5
 
 # 关联文章时间衰减
-ASSOCIATION_RECENCY_WEIGHT = 0.2        # 时间衰减最大加成
-ASSOCIATION_RECENCY_WINDOW_DAYS = 365   # 衰减窗口（天）
+ASSOCIATION_RECENCY_WEIGHT = 0.5        # 时间衰减最大加成
+ASSOCIATION_RECENCY_WINDOW_DAYS = 180   # 衰减窗口（天）
 
 # TG 推广文案长度范围
 TG_PROMO_MIN_LENGTH = 150
@@ -39,6 +39,9 @@ TG_PROMO_MAX_LENGTH = 250
 # 标签长度限制
 TAG_MAX_LENGTH = 50
 TAG_CONTENT_MAX_LENGTH = 100
+
+# 标签注册表模糊匹配阈值
+TAG_REGISTRY_FUZZY_THRESHOLD = 0.6
 
 # Embedding 缓存容量
 EMBEDDING_CACHE_SIZE = 1000
@@ -53,6 +56,9 @@ DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 
 # 标题相似度去重警告阈值（Level 3: 标题相似 + 标签完全匹配）
 TITLE_SIMILARITY_THRESHOLD = 0.85
+
+# 关联文章正文摘录上限（字符数）
+CONTENT_EXCERPT_MAX_LENGTH = 500
 
 # ── SEO 元数据常量 ──
 SEO_META_DESC_MIN_LENGTH = 120
@@ -115,6 +121,15 @@ SERIES_TITLE_PATTERN_THRESHOLD = 0.70
 SERIES_NEW_THRESHOLD = 0.85
 SERIES_LOOKBACK_DAYS = 30
 SERIES_NAV_CSS_CLASS = "blog-series-nav"
+# ── 自审偏差检测常量 ──
+SELF_REVIEW_THRESHOLD_ADJUSTMENT = 1  # writer == reviewer 时 pass/rewrite 阈值上调值
+
+# ── 审核校准膨胀警告阈值 ──
+REVIEW_INFLATION_WARNING_THRESHOLD = 8.0  # avg_overall >= 此值时发出膨胀警告
+
+# ── 套话自动刷新间隔 ──
+CLICHE_AUTO_REFRESH_HOURS = 168  # 7 天
+
 # ── 审核反馈学习常量 ──
 REVIEW_CALIBRATION_SAMPLE_SIZE = 50    # 校准统计采样量
 REVIEW_EXEMPLAR_MIN_SCORE = 8         # 高质量示例最低综合分
@@ -166,3 +181,4 @@ SURVEY_LOOKBACK_DAYS = 90         # 候选文章回溯天数
 SURVEY_MAX_SOURCE_ARTICLES = 8    # 综述最多引用的源文章数
 SURVEY_CHECK_INTERVAL = 24 * 3600  # 综述检查间隔（秒），默认 24 小时
 SURVEY_TOPIC_SIMILARITY = 0.80    # topic 模糊分组相似度阈值
+SURVEY_SCIENCE_SIMILARITY = 0.75  # science 模糊分组相似度阈值（短文本需更宽松）

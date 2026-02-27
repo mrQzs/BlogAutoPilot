@@ -138,6 +138,7 @@ class ArticleRecord:
     url: str | None = None
     created_at: datetime | None = None
     summary: str | None = None
+    content_excerpt: str | None = None
 
 
 @dataclass(frozen=True)

@@ -109,9 +109,9 @@ class TestInsertArticleSourceHash:
             mock_gc.return_value.__enter__ = lambda s: mock_conn
             mock_gc.return_value.__exit__ = MagicMock(return_value=False)
             db.insert_article(sample_article_record, source_hash="abc123")
-            # source_hash 是 INSERT 的倒数第二个参数（最后是 summary）
+            # source_hash 是 INSERT 的倒数第三个参数（后面是 summary, content_excerpt）
             call_args = mock_cursor.execute.call_args[0][1]
-            assert call_args[-2] == "abc123"
+            assert call_args[-3] == "abc123"
 
     def test_source_hash_none_by_default(self, db_settings, sample_article_record):
         """不传 source_hash 时默认为 None"""

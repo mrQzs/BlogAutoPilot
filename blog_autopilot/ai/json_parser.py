@@ -110,12 +110,20 @@ def _parse_json_response(
     抛出:
         AIResponseParseError: 解析失败或缺少必需字段
     """
-    text = response_text.strip()
+    raw_text = response_text.strip()
+
+    # 尝试 0: 先用原始文本直接解析（避免 _escape_newlines 污染正常 JSON）
+    try:
+        data = json.loads(raw_text)
+        validate_fn(data)
+        return data
+    except (json.JSONDecodeError, AIResponseParseError):
+        pass
 
     # 修复 JSON 字符串值内的原始换行符（AI 常见问题）
-    text = _escape_newlines_in_json_strings(text)
+    text = _escape_newlines_in_json_strings(raw_text)
 
-    # 尝试 1: 直接解析
+    # 尝试 1: 修复换行符后直接解析
     try:
         data = json.loads(text)
         validate_fn(data)
@@ -169,6 +177,19 @@ def _parse_json_response(
                 return data
             except (json.JSONDecodeError, AIResponseParseError):
                 pass
+
+    # 尝试 5: 用原始文本（未经换行符修复）重试 {…} 提取
+    # _escape_newlines_in_json_strings 遇到未转义引号时会污染状态，
+    # 此步用原始文本绕过
+    raw_first = raw_text.find("{")
+    raw_last = raw_text.rfind("}")
+    if raw_first != -1 and raw_last > raw_first:
+        try:
+            data = json.loads(raw_text[raw_first:raw_last + 1])
+            validate_fn(data)
+            return data
+        except (json.JSONDecodeError, AIResponseParseError):
+            pass
 
     raise AIResponseParseError(
         f"{error_prefix}。响应内容前 200 字符: "

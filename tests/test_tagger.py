@@ -12,6 +12,7 @@ from blog_autopilot.ai_writer import (
     _log_link_coverage,
     normalize_tag,
     validate_tags,
+    validate_tags_against_registry,
     build_relation_context,
 )
 from blog_autopilot.exceptions import (
@@ -77,6 +78,30 @@ class TestParseTagResponse:
     def test_empty_response(self):
         with pytest.raises(AIResponseParseError):
             _parse_tagger_response("")
+
+    def test_unescaped_quotes_in_tg_promo_regex_fallback(self):
+        """tg_promo 含未转义引号时，正则回退应成功提取"""
+        # 模拟 AI 返回 tg_promo 中含中文引号的未转义 JSON
+        text = '''{
+  "title": "用字典学习重构图像去噪",
+  "tag_magazine": "技术周刊",
+  "tag_science": "信号处理",
+  "tag_topic": "图像去噪",
+  "tag_content": "K-SVD去噪",
+  "tg_promo": "论文提出的"K-SVD"算法把字典学习引入去噪。\\n\\n#图像去噪 #字典学习"
+}'''
+        result = _parse_tagger_response(text)
+        assert result["tag_magazine"] == "技术周刊"
+        assert result["tag_topic"] == "图像去噪"
+        assert result["tag_content"] == "K-SVD去噪"
+        assert "K-SVD" in result["tg_promo"]
+
+    def test_multiline_tg_promo_with_unescaped_quotes(self):
+        """tg_promo 含真实换行和未转义引号"""
+        text = '{\n  "title": "测试标题",\n  "tag_magazine": "技术周刊",\n  "tag_science": "AI应用",\n  "tag_topic": "API开发",\n  "tag_content": "自动化",\n  "tg_promo": "第一行内容\n含"引号"的第二行\n第三行 #hashtag"\n}'
+        result = _parse_tagger_response(text)
+        assert result["title"] == "测试标题"
+        assert "引号" in result["tg_promo"]
 
 
 class TestNormalizeTag:
@@ -463,3 +488,30 @@ class TestLogLinkCoverage:
             _log_link_coverage("<p>内容</p>", associations)
 
         assert "内链覆盖" not in caplog.text
+
+
+class TestRegistryIntegration:
+    """标签注册表在提取流程中的集成测试"""
+
+    def test_extract_corrects_invalid_magazine(self, ai_settings):
+        """extract_tags_and_promo 中 closed 模式标签被修正"""
+        writer = AIWriter(ai_settings)
+
+        mock_response = json.dumps({
+            "title": "测试标题",
+            "tag_magazine": "技术月刊",  # 不在注册表中，应被修正为 技术周刊
+            "tag_science": "AI应用",
+            "tag_topic": "API开发",
+            "tag_content": "自动化",
+            "tg_promo": "A" * 180,
+        }, ensure_ascii=False)
+
+        with patch.object(writer, "call_claude", return_value=mock_response):
+            tags, _, _ = writer.extract_tags_and_promo("一些文章内容" * 100)
+
+            assert tags.tag_magazine == "技术周刊"
+
+    def test_validate_tags_against_registry_accessible(self):
+        """validate_tags_against_registry 可通过 ai_writer shim 导入"""
+        assert callable(validate_tags_against_registry)
+

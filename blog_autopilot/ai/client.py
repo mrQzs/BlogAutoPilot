@@ -12,12 +12,21 @@ from blog_autopilot.ai.relation_context import build_relation_context, _log_link
 from blog_autopilot.ai.review import (
     _parse_review_response,
     _validate_review,
+    detect_self_review_bias,
+    format_dimensional_scores,
     format_issues_for_rewrite,
+    format_progressive_feedback,
+    format_self_review_warning,
+    identify_focus_areas,
 )
 from blog_autopilot.ai.sanitize import sanitize_input
 from blog_autopilot.ai.seo import _parse_seo_response, _validate_seo_metadata
 from blog_autopilot.ai.json_parser import _parse_json_response
 from blog_autopilot.ai.tagger import _parse_tagger_response, validate_tags
+from blog_autopilot.tag_registry import (
+    build_tagger_prompt_section,
+    validate_tags_against_registry,
+)
 from blog_autopilot.config import AISettings
 from blog_autopilot.constants import (
     AI_PROMO_PREVIEW_LIMIT,
@@ -25,6 +34,7 @@ from blog_autopilot.constants import (
     CATEGORY_TEMPERATURE,
     DEFAULT_TEMPERATURE,
     QUALITY_INPUT_PREVIEW_LIMIT,
+    SELF_REVIEW_THRESHOLD_ADJUSTMENT,
     SEO_INPUT_PREVIEW_LIMIT,
     SUMMARY_INPUT_PREVIEW_LIMIT,
     TG_PROMO_MAX_LENGTH,
@@ -45,6 +55,15 @@ logger = logging.getLogger("blog-autopilot")
 
 # 提示词目录：基于本文件所在位置向上一级到 blog_autopilot/prompts
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+# 标签注册表不可用时的内联回退（含候选值示例）
+_TAG_REFERENCE_FALLBACK = (
+    "四级标签体系（从粗到细）:\n"
+    "一级 tag_magazine：杂志分类（如：技术周刊、科学前沿、商业评论、文学杂志）\n"
+    "二级 tag_science：学科领域（如：AI应用、信号处理、数据科学、量子计算）\n"
+    "三级 tag_topic：具体主题（如：API开发、图像去噪、推荐系统、文本生成）\n"
+    "四级 tag_content：内容概括，5字以内（如：Claude自动化、小波阈值降噪）\n"
+)
 
 
 def _is_retryable_ai_error(exc: BaseException) -> bool:
@@ -437,6 +456,13 @@ class AIWriter:
         logger.info(f"[Review] 正在审核文章质量... (标题: {title})")
 
         system_prompt = self._load_prompt("review_system.txt")
+
+        # 自审偏差检测
+        is_self_review = detect_self_review_bias(self._settings)
+        if is_self_review:
+            logger.warning("[Review] 检测到自审偏差: writer 和 reviewer 使用相同模型")
+            system_prompt += format_self_review_warning()
+
         if calibration_context:
             system_prompt = system_prompt + "\n" + calibration_context
         user_template = self._load_prompt("review_user.txt")
@@ -445,6 +471,12 @@ class AIWriter:
             title=title,
             article_preview=html_body[:QUALITY_INPUT_PREVIEW_LIMIT],
         )
+
+        # 计算有效阈值（自审偏差时仅上调 pass 阈值，使通过更难；rewrite 阈值不变）
+        effective_pass = pass_threshold if pass_threshold is not None else self._settings.quality_pass_threshold
+        effective_rewrite = rewrite_threshold if rewrite_threshold is not None else self._settings.quality_rewrite_threshold
+        if is_self_review:
+            effective_pass = min(effective_pass + SELF_REVIEW_THRESHOLD_ADJUSTMENT, 10)
 
         model = self._settings.model_reviewer or self._settings.model_promo
         response = self.call_claude(
@@ -457,8 +489,8 @@ class AIWriter:
         data = _parse_review_response(response)
         review = _validate_review(
             data,
-            pass_threshold=pass_threshold or self._settings.quality_pass_threshold,
-            rewrite_threshold=rewrite_threshold or self._settings.quality_rewrite_threshold,
+            pass_threshold=effective_pass,
+            rewrite_threshold=effective_rewrite,
         )
 
         logger.info(
@@ -467,6 +499,7 @@ class AIWriter:
             f"可读性: {review.readability_score} | "
             f"AI痕迹: {review.ai_cliche_score} | "
             f"综合: {review.overall_score} | 判定: {review.verdict}"
+            + (" | 自审偏差补偿已启用" if is_self_review else "")
         )
         return review
 
@@ -477,21 +510,40 @@ class AIWriter:
         source_text: str,
         review: QualityReview,
         category_name: str | None = None,
+        previous_review: QualityReview | None = None,
+        attempt: int = 1,
+        exemplar_context: str = "",
     ) -> ArticleResult:
         """
         根据审核反馈重写文章。
+
+        Args:
+            previous_review: 上一次审核结果（用于渐进式反馈对比）
+            attempt: 当前重写次数（1-based）
+            exemplar_context: 高质量文章示例文本，追加到 system prompt 末尾
 
         抛出:
             AIAPIError: API 调用失败
             AIResponseParseError: 返回内容解析失败
         """
-        logger.info(f"[Rewrite] 正在根据审核反馈重写文章... (标题: {title})")
+        logger.info(f"[Rewrite] 正在根据审核反馈重写文章... (标题: {title}, 第 {attempt} 次)")
 
         system_prompt = self._get_writer_system_prompt(category_name)
+        if exemplar_context:
+            system_prompt = system_prompt + "\n" + exemplar_context
         user_template = self._load_prompt("rewrite_feedback_user.txt")
+
+        # 增强反馈信息
+        dimensional_scores = format_dimensional_scores(review)
+        focus_areas = identify_focus_areas(review)
+        progressive = format_progressive_feedback(review, previous_review, attempt)
+
         user_prompt = user_template.format(
+            dimensional_scores=dimensional_scores,
+            focus_areas=focus_areas,
             review_summary=review.summary,
             issues_text=format_issues_for_rewrite(review.issues),
+            progressive_feedback=progressive,
             source_preview=source_text[:QUALITY_INPUT_PREVIEW_LIMIT],
             title=title,
             article_body=sanitize_input(html_body, AI_WRITER_INPUT_LIMIT),
@@ -532,6 +584,13 @@ class AIWriter:
         )
 
         system_prompt = self._load_prompt("tagger_system.txt")
+        # 动态注入注册表标签参考
+        tag_ref = build_tagger_prompt_section()
+        if tag_ref:
+            system_prompt = system_prompt.replace("{tag_reference}", tag_ref)
+        else:
+            # 注册表不可用时使用内联回退（含候选值示例）
+            system_prompt = system_prompt.replace("{tag_reference}", _TAG_REFERENCE_FALLBACK)
         user_template = self._load_prompt("tagger_user.txt")
         user_prompt = user_template.format(
             article_content=sanitize_input(article_content, AI_WRITER_INPUT_LIMIT)
@@ -553,6 +612,7 @@ class AIWriter:
             tag_content=data["tag_content"],
         )
         tags = validate_tags(tags)
+        tags = validate_tags_against_registry(tags)
         from blog_autopilot.tag_normalizer import normalize_synonym
         tags = TagSet(
             tag_magazine=normalize_synonym(tags.tag_magazine),
@@ -595,6 +655,11 @@ class AIWriter:
         logger.info("[TagReview] 标签一致性偏低，调用 AI 复核...")
 
         system_prompt = self._load_prompt("tag_review_system.txt")
+        # 动态注入注册表标签参考
+        tag_ref = build_tagger_prompt_section()
+        system_prompt = system_prompt.replace(
+            "{tag_reference}", tag_ref if tag_ref else _TAG_REFERENCE_FALLBACK
+        )
         user_template = self._load_prompt("tag_review_user.txt")
 
         # 格式化邻居标签
@@ -650,6 +715,7 @@ class AIWriter:
             tag_content=data.get("tag_content", tags.tag_content),
         )
         reviewed = validate_tags(reviewed)
+        reviewed = validate_tags_against_registry(reviewed)
         from blog_autopilot.tag_normalizer import normalize_synonym
         reviewed = TagSet(
             tag_magazine=normalize_synonym(reviewed.tag_magazine),

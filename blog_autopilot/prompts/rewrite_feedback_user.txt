@@ -1,10 +1,16 @@
 以下文章未通过质量审核，请根据审核反馈进行修改。
 
+## 审核评分
+{dimensional_scores}
+
+## 重点改进方向
+{focus_areas}
+
 ## 审核总结
 {review_summary}
 
 ## 具体问题
-{issues_text}
+{issues_text}{progressive_feedback}
 
 ## 原始素材预览
 {source_preview}
@@ -15,4 +21,4 @@
 ## 原文章内容
 {article_body}
 
-请根据审核反馈修改文章，保持原有结构，输出格式与原文章一致：第一行为标题，其余为 HTML 正文。
+请根据审核反馈修改文章，重点改进最弱维度。保持原有结构，输出格式与原文章一致：第一行为标题，其余为 HTML 正文。

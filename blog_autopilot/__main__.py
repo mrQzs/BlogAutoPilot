@@ -116,6 +116,51 @@ def main() -> None:
         print(updater.format_output(report))
         return
 
+    # --backfill-summaries: 为缺少 summary 的旧文章生成摘要
+    if "--backfill-summaries" in sys.argv:
+        settings = get_settings()
+        if not settings.database or not settings.database.user:
+            print("错误: 数据库未配置，无法执行摘要回填")
+            sys.exit(1)
+
+        limit = 50
+        if "--limit" in sys.argv:
+            idx = sys.argv.index("--limit")
+            if idx + 1 < len(sys.argv):
+                try:
+                    limit = int(sys.argv[idx + 1])
+                except ValueError:
+                    print(f"错误: --limit 参数必须为整数，收到: {sys.argv[idx + 1]}")
+                    sys.exit(1)
+
+        from blog_autopilot.ai_writer import AIWriter
+        from blog_autopilot.db import Database
+
+        db = Database(settings.database)
+        writer = AIWriter(settings.ai)
+        articles = db.fetch_articles_without_summary(limit=limit)
+        if not articles:
+            print("所有文章均已有摘要，无需回填")
+            return
+
+        print(f"待回填摘要: {len(articles)} 篇")
+        success = 0
+        for art in articles:
+            try:
+                # 优先使用 content_excerpt，回退到 tg_promo
+                content = art.get("content_excerpt") or art.get("tg_promo", "")
+                if not content:
+                    print(f"  跳过 [{art['id']}] {art['title']}: 无可用内容")
+                    continue
+                summary = writer.generate_summary(art["title"], content)
+                db.update_article_summary(art["id"], summary)
+                success += 1
+                print(f"  [{success}] {art['title']}")
+            except Exception as e:
+                print(f"  失败 [{art['id']}] {art['title']}: {e}")
+        print(f"\n回填完成: {success}/{len(articles)} 篇")
+        return
+
     # --generate-survey: 综述文章生成 + 发布 + 推广
     if "--generate-survey" in sys.argv:
         settings = get_settings()

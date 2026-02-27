@@ -9,6 +9,7 @@ from blog_autopilot.constants import (
     SURVEY_LOOKBACK_DAYS,
     SURVEY_MAX_SOURCE_ARTICLES,
     SURVEY_MIN_ARTICLES,
+    SURVEY_SCIENCE_SIMILARITY,
     SURVEY_TOPIC_SIMILARITY,
 )
 from blog_autopilot.db import Database
@@ -34,14 +35,114 @@ class SurveyGenerator:
             except Exception as e:
                 logger.warning(f"综述 embedding 初始化失败，回退精确匹配: {e}")
 
+    def _merge_similar_sciences(
+        self, rows: list[dict],
+    ) -> list[dict]:
+        """
+        对同一 magazine 下的 tag_science 做 embedding 聚类，
+        将语义相近的 science（如 信号处理/图像处理）统一为频率最高的标签。
+        """
+        if not self._embedding_client:
+            return rows
+
+        from blog_autopilot.series import _cosine_similarity
+
+        # 按 magazine 分组，收集去重的 science 标签
+        mag_sciences: dict[str, set[str]] = {}
+        for r in rows:
+            mag_sciences.setdefault(r["tag_magazine"], set()).add(r["tag_science"])
+
+        # 对每个 magazine 内的 science 做聚类
+        science_rename: dict[tuple[str, str], str] = {}
+        for mag, sciences in mag_sciences.items():
+            if len(sciences) < 2:
+                continue
+
+            sci_list = sorted(sciences)
+            emb_map: dict[str, list[float]] = {}
+            for s in sci_list:
+                try:
+                    emb_map[s] = self._embedding_client.get_embedding(
+                        f"{mag} {s}",
+                    )
+                except Exception as e:
+                    logger.warning(f"science '{s}' embedding 失败: {e}")
+
+            if len(emb_map) < 2:
+                continue
+
+            # union-find
+            parent: dict[str, str] = {s: s for s in emb_map}
+
+            def find(x: str) -> str:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def union(a: str, b: str) -> None:
+                parent[find(a)] = find(b)
+
+            emb_keys = list(emb_map.keys())
+            for i, j in combinations(range(len(emb_keys)), 2):
+                a, b = emb_keys[i], emb_keys[j]
+                sim = _cosine_similarity(emb_map[a], emb_map[b])
+                if sim >= SURVEY_SCIENCE_SIMILARITY:
+                    union(a, b)
+
+            # 收集分组，选频率最高的作为 canonical
+            groups: dict[str, list[str]] = {}
+            for s in emb_keys:
+                groups.setdefault(find(s), []).append(s)
+
+            # 统计每个 science 的文章数
+            sci_count: dict[str, int] = {}
+            for r in rows:
+                if r["tag_magazine"] == mag:
+                    sci_count[r["tag_science"]] = (
+                        sci_count.get(r["tag_science"], 0)
+                        + r["article_count"]
+                    )
+
+            for members in groups.values():
+                if len(members) < 2:
+                    continue
+                members.sort(
+                    key=lambda s: sci_count.get(s, 0), reverse=True,
+                )
+                canonical = members[0]
+                for s in members[1:]:
+                    science_rename[(mag, s)] = canonical
+                    logger.info(
+                        f"综述 science 聚类: '{s}' -> '{canonical}'"
+                    )
+
+        if not science_rename:
+            return rows
+
+        # 应用重命名
+        merged = []
+        for r in rows:
+            key = (r["tag_magazine"], r["tag_science"])
+            if key in science_rename:
+                r = dict(r)
+                r["_original_science"] = r["tag_science"]
+                r["tag_science"] = science_rename[key]
+            merged.append(r)
+        return merged
+
     def _cluster_topics(
         self, rows: list[dict],
     ) -> list[dict]:
         """
-        对同 (magazine, science) 下的 topic 做 embedding 模糊聚类。
+        先对同 magazine 下的 science 做 embedding 模糊聚类，
+        再对合并后的桶内 topic 做 embedding 模糊聚类。
         返回合并后的候选列表，每项含 tag_topics (list) 和 article_count。
         """
         from blog_autopilot.series import _cosine_similarity
+
+        # --- 第一步：对 tag_science 做 embedding 聚类 ---
+        rows = self._merge_similar_sciences(rows)
 
         # 按 (magazine, science) 分桶
         buckets: dict[tuple[str, str], list[dict]] = {}
@@ -53,6 +154,11 @@ class SurveyGenerator:
         for (mag, sci), items in buckets.items():
             topics = [it["tag_topic"] for it in items]
             count_map = {it["tag_topic"]: it["article_count"] for it in items}
+            # 收集该桶内所有原始 science（含被聚类合并的）
+            all_sciences = list({
+                it.get("_original_science", it["tag_science"])
+                for it in items
+            })
 
             if not self._embedding_client or len(topics) < 2:
                 # 无 embedding，按原始精确匹配
@@ -60,6 +166,7 @@ class SurveyGenerator:
                     results.append({
                         "tag_magazine": mag,
                         "tag_science": sci,
+                        "tag_sciences": all_sciences,
                         "tag_topic": it["tag_topic"],
                         "tag_topics": [it["tag_topic"]],
                         "article_count": it["article_count"],
@@ -111,6 +218,7 @@ class SurveyGenerator:
                 results.append({
                     "tag_magazine": mag,
                     "tag_science": sci,
+                    "tag_sciences": all_sciences,
                     "tag_topic": members[0],
                     "tag_topics": members,
                     "article_count": total,
@@ -145,10 +253,11 @@ class SurveyGenerator:
         """
         tag_mag = candidate["tag_magazine"]
         tag_sci = candidate["tag_science"]
+        tag_scis = candidate.get("tag_sciences") or [tag_sci]
         tag_tops = candidate.get("tag_topics") or [candidate["tag_topic"]]
 
         articles = self._db.fetch_articles_by_tags(
-            tag_mag, tag_sci, tag_tops,
+            tag_mag, tag_scis, tag_tops,
             limit=SURVEY_MAX_SOURCE_ARTICLES,
         )
         if len(articles) < SURVEY_MIN_ARTICLES:
