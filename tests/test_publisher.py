@@ -6,9 +6,11 @@ from unittest.mock import MagicMock, patch
 from blog_autopilot.config import WordPressSettings
 from blog_autopilot.exceptions import WordPressError
 from blog_autopilot.publisher import (
+    _get_categories_url,
+    _get_tags_url,
     ensure_wp_tags,
     post_to_wordpress,
-    _get_tags_url,
+    sync_wp_taxonomy_mappings,
 )
 
 
@@ -128,25 +130,98 @@ class TestGetTagsUrl:
         assert "rest_route=%2Fwp%2Fv2%2Ftags" in url
 
 
+class TestGetCategoriesUrl:
+
+    def test_pretty_permalink(self):
+        url = _get_categories_url("https://test.wp/wp-json/wp/v2/posts")
+        assert url == "https://test.wp/wp-json/wp/v2/categories"
+
+    def test_rest_route_param(self):
+        url = _get_categories_url("https://test.wp/?rest_route=/wp/v2/posts")
+        assert "rest_route=%2Fwp%2Fv2%2Fcategories" in url
+
+
 class TestEnsureWPTags:
 
-    @patch("blog_autopilot.publisher._create_or_get_wp_tag")
+    @patch("blog_autopilot.publisher._create_or_get_wp_term")
     def test_all_tags_created(self, mock_create, wp_settings):
         mock_create.side_effect = [10, 20, 30]
         ids = ensure_wp_tags(("标签1", "标签2", "标签3"), wp_settings)
         assert ids == [10, 20, 30]
 
-    @patch("blog_autopilot.publisher._create_or_get_wp_tag")
+    @patch("blog_autopilot.publisher._create_or_get_wp_term")
     def test_existing_tag(self, mock_create, wp_settings):
         mock_create.side_effect = [10, 20, 30]
         ids = ensure_wp_tags(("新标签", "已有标签", "另一个"), wp_settings)
         assert len(ids) == 3
 
-    @patch("blog_autopilot.publisher._create_or_get_wp_tag")
+    @patch("blog_autopilot.publisher._create_or_get_wp_term")
     def test_partial_failure(self, mock_create, wp_settings):
         mock_create.side_effect = [10, None, 30]
         ids = ensure_wp_tags(("标签1", "失败标签", "标签3"), wp_settings)
         assert ids == [10, 30]
+
+
+
+
+class TestSyncWPTaxonomyMappings:
+
+    @patch("blog_autopilot.publisher._fetch_wp_taxonomy_map")
+    @patch("blog_autopilot.publisher._create_or_get_wp_term")
+    def test_resolve_existing_terms(self, mock_create_term, mock_fetch_map, wp_settings):
+        mock_fetch_map.return_value = {
+            "category_slug_to_id": {"tech-weekly": 101},
+            "category_name_to_id": {"技术周刊": 101},
+            "tag_slug_to_id": {"api-dev": 201},
+            "tag_name_to_id": {"API开发": 201},
+        }
+        mock_create_term.return_value = None
+
+        result = sync_wp_taxonomy_mappings(
+            category_mapping={"name": "技术周刊", "category_slug": "tech-weekly", "auto_create": False},
+            tag_mappings=[{"name": "API开发", "tag_slug": "api-dev", "auto_create": False}],
+            settings=wp_settings,
+        )
+
+        assert result["category_id"] == 101
+        assert result["tag_ids"] == [201]
+        mock_create_term.assert_not_called()
+
+    @patch("blog_autopilot.publisher._fetch_wp_taxonomy_map")
+    @patch("blog_autopilot.publisher._create_or_get_wp_term")
+    def test_auto_create_missing_tag(self, mock_create_term, mock_fetch_map, wp_settings):
+        mock_fetch_map.return_value = {
+            "category_slug_to_id": {},
+            "category_name_to_id": {},
+            "tag_slug_to_id": {},
+            "tag_name_to_id": {},
+        }
+        mock_create_term.return_value = 333
+
+        result = sync_wp_taxonomy_mappings(
+            category_mapping=None,
+            tag_mappings=[{"name": "新主题", "tag_slug": "new-topic", "auto_create": True}],
+            settings=wp_settings,
+        )
+
+        assert result["category_id"] is None
+        assert result["tag_ids"] == [333]
+        mock_create_term.assert_called_once()
+
+    @patch("blog_autopilot.publisher._fetch_wp_taxonomy_map")
+    def test_sync_failure_downgrades(self, mock_fetch_map, wp_settings):
+        mock_fetch_map.side_effect = Exception("network down")
+
+        result = sync_wp_taxonomy_mappings(
+            category_mapping={"name": "技术周刊", "auto_create": False},
+            tag_mappings=[{"name": "API开发", "auto_create": False}],
+            settings=wp_settings,
+        )
+
+        assert result["category_id"] is None
+        assert result["tag_ids"] == []
+        assert result["taxonomy_map"] is None
+
 
 
 class TestPostToWordpress5xx:

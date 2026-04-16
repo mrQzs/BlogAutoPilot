@@ -23,7 +23,8 @@ def mock_openai_response():
     mock_resp = MagicMock()
     mock_resp.choices = [MagicMock()]
     mock_resp.choices[0].message.content = (
-        "测试标题\n<h2>章节一</h2>\n<p>正文内容</p>"
+        "测试标题\n<h2>章节一</h2>\n<p>正文内容</p>\n"
+        + "<p>这是一段足够长的测试正文内容，用于通过最小长度校验。</p>\n" * 10
     )
     mock_resp.usage.prompt_tokens = 100
     mock_resp.usage.completion_tokens = 50
@@ -102,7 +103,8 @@ class TestGenerateBlogPostWithContext:
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = (
-            "增强标题\n<h2>章节</h2>\n<p>引用了关联文章</p>"
+            "增强标题\n<h2>章节</h2>\n<p>引用了关联文章</p>\n"
+            + "<p>这是一段足够长的测试正文内容，用于通过最小长度校验。</p>\n" * 10
         )
         mock_resp.usage.prompt_tokens = 200
         mock_resp.usage.completion_tokens = 100

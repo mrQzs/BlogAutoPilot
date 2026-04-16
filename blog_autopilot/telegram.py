@@ -46,6 +46,9 @@ def send_to_telegram(
         payload = {
             "chat_id": settings.channel_id,
             "text": msg,
+            "link_preview_options": {
+                "url": link,
+            },
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -57,7 +60,9 @@ def send_to_telegram(
             raise TelegramError(f"Telegram 推送异常: {e}") from e
 
         if data.get("ok"):
-            logger.info("Telegram 推送成功!")
+            msg_id = data.get("result", {}).get("message_id", "?")
+            chat_id = data.get("result", {}).get("chat", {}).get("id", "?")
+            logger.info(f"Telegram 推送成功 | chat_id: {chat_id} | message_id: {msg_id}")
             return True
 
         # 解析错误时降级重试
@@ -123,7 +128,9 @@ def send_photo_to_telegram(
             raise TelegramError(f"Telegram 图片推送异常: {e}") from e
 
         if result.get("ok"):
-            logger.info("Telegram 图片推送成功!")
+            msg_id = result.get("result", {}).get("message_id", "?")
+            chat_id = result.get("result", {}).get("chat", {}).get("id", "?")
+            logger.info(f"Telegram 图片推送成功 | chat_id: {chat_id} | message_id: {msg_id}")
             return True
 
         desc = result.get("description", "")

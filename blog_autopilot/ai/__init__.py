@@ -14,7 +14,7 @@ from blog_autopilot.ai.review import (
     format_self_review_warning,
     identify_focus_areas,
 )
-from blog_autopilot.ai.sanitize import sanitize_input
+from blog_autopilot.ai.sanitize import check_ai_identity_leak, sanitize_input, strip_ai_identity_lines
 from blog_autopilot.ai.seo import _parse_seo_response, _validate_seo_metadata
 from blog_autopilot.ai.tagger import (
     _parse_tagger_response,
@@ -36,6 +36,7 @@ __all__ = [
     "_validate_seo_metadata",
     "_warn_unclosed_tags",
     "build_relation_context",
+    "check_ai_identity_leak",
     "detect_self_review_bias",
     "format_dimensional_scores",
     "format_issues_for_rewrite",
@@ -44,6 +45,7 @@ __all__ = [
     "identify_focus_areas",
     "normalize_tag",
     "sanitize_input",
+    "strip_ai_identity_lines",
     "validate_tags",
     "validate_tags_against_registry",
 ]

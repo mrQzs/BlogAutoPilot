@@ -20,6 +20,12 @@ MIN_EXTRACTED_TEXT_LENGTH = 50
 # 监控间隔（秒）
 POLL_INTERVAL = 60
 
+# API 健康检测间隔（秒），默认 8 小时
+HEALTH_CHECK_INTERVAL = 8 * 3600
+
+# WordPress taxonomy 同步间隔（秒），默认 60 分钟
+WP_TAXONOMY_SYNC_INTERVAL = 60 * 60
+
 # ── 文章关联系统常量 ──
 
 # 标签匹配最低阈值（低于此值的候选文章被过滤）
@@ -176,9 +182,13 @@ SERIES_TITLE_PATTERNS = (
 )
 
 # ── 综述文章生成常量 ──
-SURVEY_MIN_ARTICLES = 2           # 触发综述的最少文章数
+SURVEY_MIN_ARTICLES = 5           # 触发综述的最少文章数
 SURVEY_LOOKBACK_DAYS = 90         # 候选文章回溯天数
 SURVEY_MAX_SOURCE_ARTICLES = 8    # 综述最多引用的源文章数
 SURVEY_CHECK_INTERVAL = 24 * 3600  # 综述检查间隔（秒），默认 24 小时
 SURVEY_TOPIC_SIMILARITY = 0.80    # topic 模糊分组相似度阈值
 SURVEY_SCIENCE_SIMILARITY = 0.75  # science 模糊分组相似度阈值（短文本需更宽松）
+
+# ── 文章最小正文长度（低于此值视为生成失败） ──
+ARTICLE_MIN_BODY_LENGTH = 200         # 普通文章最小正文长度
+SURVEY_MIN_BODY_LENGTH = 500          # 综述文章最小正文长度

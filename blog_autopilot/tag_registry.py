@@ -233,6 +233,122 @@ def build_tagger_prompt_section() -> str:
     return "\n".join(lines)
 
 
+def _get_wordpress_defaults(level: str) -> dict:
+    """获取层级级别的 WordPress 默认配置（向后兼容）。"""
+    registry = _load_registry()
+    entry = registry.get(level, {})
+    wp = entry.get("wordpress", {})
+    return {
+        "auto_create": bool(wp.get("auto_create", False)),
+        "syncable": bool(wp.get("syncable", False)),
+    }
+
+
+def get_wordpress_mapping(level: str, value: str) -> dict:
+    """
+    获取指定层级+标签值的 WordPress 映射配置。
+
+    返回字段（缺失时为 None/默认值）：
+    - category_slug / category_id（L1）
+    - tag_slug / tag_id（L3）
+    - auto_create / syncable
+    """
+    registry = _load_registry()
+    entry = registry.get(level, {})
+    wp = entry.get("wordpress", {})
+    value_mappings = wp.get("mappings", {})
+    mapped = value_mappings.get(value, {}) if isinstance(value_mappings, dict) else {}
+
+    defaults = _get_wordpress_defaults(level)
+    return {
+        "category_slug": mapped.get("category_slug"),
+        "category_id": mapped.get("category_id"),
+        "tag_slug": mapped.get("tag_slug"),
+        "tag_id": mapped.get("tag_id"),
+        "auto_create": bool(mapped.get("auto_create", defaults["auto_create"])),
+        "syncable": bool(mapped.get("syncable", defaults["syncable"])),
+    }
+
+
+def get_syncable_wordpress_terms() -> dict[str, list[dict]]:
+    """
+    返回需参与周期同步的 WordPress term 列表。
+
+    仅包含声明了 wordpress.syncable=true 且含 slug/id/auto_create 的项。
+    """
+    registry = _load_registry()
+    if not registry:
+        return {"categories": [], "tags": []}
+
+    categories: list[dict] = []
+    tags: list[dict] = []
+
+    for level in ("tag_magazine", "tag_topic"):
+        entry = registry.get(level, {})
+        values = entry.get("values", [])
+        for value in values:
+            mapping = get_wordpress_mapping(level, value)
+            if not mapping.get("syncable"):
+                continue
+
+            if level == "tag_magazine":
+                categories.append(
+                    {
+                        "level": level,
+                        "value": value,
+                        "name": value,
+                        "category_slug": mapping.get("category_slug"),
+                        "category_id": mapping.get("category_id"),
+                        "auto_create": mapping.get("auto_create", False),
+                    }
+                )
+            elif level == "tag_topic":
+                tags.append(
+                    {
+                        "level": level,
+                        "value": value,
+                        "name": value,
+                        "tag_slug": mapping.get("tag_slug"),
+                        "tag_id": mapping.get("tag_id"),
+                        "auto_create": mapping.get("auto_create", False),
+                    }
+                )
+
+    return {"categories": categories, "tags": tags}
+
+
+def derive_wp_taxonomy_from_internal(tags: TagSet) -> dict:
+    """
+    从内部标签提取 WordPress taxonomy 目标（L1 category + L3 topic tag）。
+    """
+    category = None
+    topic_tags: list[dict] = []
+
+    if tags.tag_magazine:
+        mapping = get_wordpress_mapping("tag_magazine", tags.tag_magazine)
+        category = {
+            "name": tags.tag_magazine,
+            "category_slug": mapping.get("category_slug"),
+            "category_id": mapping.get("category_id"),
+            "auto_create": mapping.get("auto_create", False),
+            "syncable": mapping.get("syncable", False),
+        }
+
+    if tags.tag_topic:
+        mapping = get_wordpress_mapping("tag_topic", tags.tag_topic)
+        topic_tags.append(
+            {
+                "name": tags.tag_topic,
+                "tag_slug": mapping.get("tag_slug"),
+                "tag_id": mapping.get("tag_id"),
+                "auto_create": mapping.get("auto_create", False),
+                "syncable": mapping.get("syncable", False),
+            }
+        )
+
+    return {"category": category, "tags": topic_tags}
+
+
 def derive_wp_tags_from_internal(tags: TagSet) -> list[str]:
     """
     从内部四级标签中提取需要同步到 WordPress 的标签名。

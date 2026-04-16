@@ -24,12 +24,12 @@ from blog_autopilot.tag_governance import (
 # ── 测试数据 ──
 
 SAMPLE_TAG_ROWS = [
-    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "GPT", "created_at": None},
-    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "CV", "tag_content": "图像识别", "created_at": None},
-    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "BERT", "created_at": None},
-    {"tag_magazine": "文化", "tag_science": "历史", "tag_topic": "古代", "tag_content": "唐朝", "created_at": None},
-    {"tag_magazine": "科技", "tag_science": "安全", "tag_topic": "加密", "tag_content": "RSA", "created_at": None},
-    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "Transformer", "created_at": None},
+    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "GPT", "created_at": "2026-01-01 10:00:00"},
+    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "CV", "tag_content": "图像识别", "created_at": "2026-01-03 10:00:00"},
+    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "BERT", "created_at": "2026-01-05 10:00:00"},
+    {"tag_magazine": "文化", "tag_science": "历史", "tag_topic": "古代", "tag_content": "唐朝", "created_at": "2025-12-20 09:00:00"},
+    {"tag_magazine": "科技", "tag_science": "安全", "tag_topic": "加密", "tag_content": "RSA", "created_at": "2026-02-01 08:00:00"},
+    {"tag_magazine": "科技", "tag_science": "AI", "tag_topic": "NLP", "tag_content": "Transformer", "created_at": "2026-02-10 11:00:00"},
 ]
 
 
@@ -70,6 +70,12 @@ class TestCollectTagStats:
         mag_stats = [s for s in stats if s.level == "magazine"]
         tech = next(s for s in mag_stats if s.tag == "科技")
         assert tech.count == 5
+
+    def test_tracks_first_and_last_seen(self):
+        stats = TagAuditor._collect_tag_stats(SAMPLE_TAG_ROWS)
+        ai = next(s for s in stats if s.level == "science" and s.tag == "AI")
+        assert ai.first_seen == "2026-01-01 10:00:00"
+        assert ai.last_seen == "2026-02-10 11:00:00"
 
     def test_all_levels_present(self):
         stats = TagAuditor._collect_tag_stats(SAMPLE_TAG_ROWS)
@@ -219,6 +225,38 @@ class TestCrossCheck:
         assert result[0].already_mapped is False
 
 
+# ── test_orphan_tags ──
+
+class TestOrphanTags:
+    @patch("blog_autopilot.tag_normalizer._load_synonyms")
+    def test_find_orphan_tags(self, mock_load):
+        mock_load.return_value = {"人工智能": ["AI"]}
+        stats = [
+            TagStats(tag="AI", level="science", count=3),
+            TagStats(tag="图像去噪", level="topic", count=1, last_seen="2026-01-01 10:00:00"),
+            TagStats(tag="DeepNLP", level="content", count=1, last_seen="2026-02-01 10:00:00"),
+        ]
+
+        orphans = TagAuditor._find_orphan_tags(stats)
+
+        assert len(orphans) == 2
+        orphan_tags = {o.tag for o in orphans}
+        assert "图像去噪" in orphan_tags
+        assert "DeepNLP" in orphan_tags
+
+    @patch("blog_autopilot.tag_normalizer._load_synonyms")
+    def test_skip_mapped_singleton_tags(self, mock_load):
+        mock_load.return_value = {"人工智能": ["AI", "AI技术"]}
+        stats = [
+            TagStats(tag="AI技术", level="science", count=1),
+            TagStats(tag="人工智能", level="science", count=2),
+        ]
+
+        orphans = TagAuditor._find_orphan_tags(stats)
+
+        assert orphans == []
+
+
 # ── test_export_json_structure ──
 
 class TestExportJson:
@@ -226,7 +264,15 @@ class TestExportJson:
         report = TagAuditReport(
             article_count=10,
             unique_tag_count=5,
-            tag_stats=(TagStats(tag="AI", level="science", count=3),),
+            tag_stats=(
+                TagStats(
+                    tag="AI",
+                    level="science",
+                    count=3,
+                    first_seen="2026-01-01 10:00:00",
+                    last_seen="2026-02-10 11:00:00",
+                ),
+            ),
             top_cooccurrences=(
                 CooccurrencePair(tag_a="AI", tag_b="科技", co_count=2),
             ),
@@ -240,6 +286,15 @@ class TestExportJson:
                 ),
             ),
             embedding_available=True,
+            orphan_tags=(
+                TagStats(
+                    tag="DeepNLP",
+                    level="content",
+                    count=1,
+                    first_seen="2026-02-01 10:00:00",
+                    last_seen="2026-02-01 10:00:00",
+                ),
+            ),
         )
         output = TagAuditor.export_json(report)
         data = json.loads(output)
@@ -247,9 +302,13 @@ class TestExportJson:
         assert data["unique_tag_count"] == 5
         assert data["embedding_available"] is True
         assert len(data["tag_stats"]) == 1
+        assert data["tag_stats"][0]["first_seen"] == "2026-01-01 10:00:00"
+        assert data["tag_stats"][0]["last_seen"] == "2026-02-10 11:00:00"
         assert len(data["top_cooccurrences"]) == 1
         assert len(data["suggestions"]) == 1
         assert data["suggestions"][0]["canonical"] == "人工智能"
+        assert len(data["orphan_tags"]) == 1
+        assert data["orphan_tags"][0]["tag"] == "DeepNLP"
 
 
 # ── test_format_output_readable ──
@@ -260,13 +319,27 @@ class TestFormatOutput:
             article_count=10,
             unique_tag_count=5,
             tag_stats=(
-                TagStats(tag="AI", level="science", count=3),
+                TagStats(
+                    tag="AI",
+                    level="science",
+                    count=3,
+                    first_seen="2026-01-01 10:00:00",
+                    last_seen="2026-02-10 11:00:00",
+                ),
             ),
             top_cooccurrences=(
                 CooccurrencePair(tag_a="AI", tag_b="科技", co_count=2),
             ),
             suggestions=(),
             embedding_available=False,
+            orphan_tags=(
+                TagStats(
+                    tag="DeepNLP",
+                    level="content",
+                    count=1,
+                    last_seen="2026-02-01 10:00:00",
+                ),
+            ),
         )
         auditor = _make_auditor()
         output = auditor.format_output(report)
@@ -274,8 +347,10 @@ class TestFormatOutput:
         assert "文章总数: 10" in output
         assert "唯一标签数: 5" in output
         assert "不可用" in output
-        assert "AI (3)" in output
+        assert "AI (3)  [2026-01-01 10:00:00 ~ 2026-02-10 11:00:00]" in output
         assert "AI + 科技 (2)" in output
+        assert "孤立标签 — 待审核" in output
+        assert "DeepNLP (content)  最后使用: 2026-02-01 10:00:00" in output
 
 
 # ── test_merge_suggestions ──

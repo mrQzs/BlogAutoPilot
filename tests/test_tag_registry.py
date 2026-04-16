@@ -11,8 +11,11 @@ from blog_autopilot.tag_registry import (
     _load_registry,
     build_tagger_prompt_section,
     derive_wp_tags_from_internal,
+    derive_wp_taxonomy_from_internal,
     get_allowed_values,
     get_mode,
+    get_syncable_wordpress_terms,
+    get_wordpress_mapping,
     validate_against_registry,
     validate_tags_against_registry,
 )
@@ -322,7 +325,42 @@ class TestBuildTaggerPromptSection:
 # ── WordPress 桥接 ──
 
 
-class TestDeriveWpTags:
+
+
+class TestWordPressMappings:
+
+    def test_get_wordpress_mapping_with_defaults(self):
+        mapping = get_wordpress_mapping("tag_topic", "API开发")
+        assert mapping["tag_slug"] == "api-dev"
+        assert mapping["auto_create"] is True
+        assert mapping["syncable"] is True
+
+    def test_get_wordpress_mapping_unknown_value_fallback(self):
+        mapping = get_wordpress_mapping("tag_topic", "全新主题")
+        assert mapping["tag_slug"] is None
+        # 回退到 level 默认 wordpress.auto_create/syncable
+        assert mapping["auto_create"] is True
+        assert mapping["syncable"] is True
+
+    def test_get_syncable_wordpress_terms(self):
+        terms = get_syncable_wordpress_terms()
+        assert terms["categories"]
+        assert terms["tags"]
+        assert any(item["value"] == "技术周刊" for item in terms["categories"])
+        assert any(item["value"] == "API开发" for item in terms["tags"])
+
+    def test_derive_wp_taxonomy_from_internal(self):
+        tags = TagSet(
+            tag_magazine="技术周刊",
+            tag_science="AI应用",
+            tag_topic="API开发",
+            tag_content="Claude自动化",
+        )
+        result = derive_wp_taxonomy_from_internal(tags)
+        assert result["category"]["name"] == "技术周刊"
+        assert result["category"]["category_slug"] == "tech-weekly"
+        assert result["tags"][0]["name"] == "API开发"
+        assert result["tags"][0]["tag_slug"] == "api-dev"
 
     def test_wp_mapping_true(self):
         tags = TagSet(

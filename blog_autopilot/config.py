@@ -13,6 +13,8 @@ class WordPressSettings(BaseSettings):
     user: str
     app_password: SecretStr
     target_category_id: int = 15
+    taxonomy_sync_enabled: bool = True
+    taxonomy_sync_interval_minutes: int = 60
 
     @field_validator("url")
     @classmethod
@@ -26,6 +28,13 @@ class WordPressSettings(BaseSettings):
     def user_must_be_non_empty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("user must not be empty")
+        return v
+
+    @field_validator("taxonomy_sync_interval_minutes")
+    @classmethod
+    def taxonomy_sync_interval_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("taxonomy_sync_interval_minutes must be positive")
         return v
 
 
@@ -61,6 +70,7 @@ class AISettings(BaseSettings):
     model_reviewer: str = ""
     reviewer_api_key: SecretStr | None = None
     reviewer_api_base: str = ""
+    reviewer_headers: dict[str, str] = {}
     reviewer_max_tokens: int = 4096
     quality_pass_threshold: int = 7
     quality_rewrite_threshold: int = 5

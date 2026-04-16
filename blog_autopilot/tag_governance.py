@@ -68,6 +68,7 @@ class TagAuditor:
             suggestions = self._find_semantic_duplicates(tag_stats)
 
         suggestions = self._cross_check_existing(suggestions)
+        orphans = self._find_orphan_tags(tag_stats)
 
         unique_tags = {ts.tag for ts in tag_stats}
         return TagAuditReport(
@@ -77,23 +78,76 @@ class TagAuditor:
             top_cooccurrences=tuple(cooccurrences),
             suggestions=tuple(suggestions),
             embedding_available=embedding_available,
+            orphan_tags=tuple(orphans),
         )
 
     @staticmethod
     def _collect_tag_stats(tag_rows: list[dict]) -> list[TagStats]:
-        """按层级统计每个唯一标签的出现频率"""
+        """按层级统计每个唯一标签的出现频率和首次/末次使用时间"""
         counters: dict[str, Counter] = {lv: Counter() for lv in TAG_LEVELS}
+        # (level, tag) → {"first": datetime, "last": datetime}
+        date_range: dict[tuple[str, str], dict[str, str]] = {}
+
         for row in tag_rows:
+            created = row.get("created_at")
+            created_str = str(created) if created else None
             for lv in TAG_LEVELS:
                 val = row.get(f"tag_{lv}", "")
                 if val:
                     counters[lv][val] += 1
+                    if created_str:
+                        key = (lv, val)
+                        if key not in date_range:
+                            date_range[key] = {
+                                "first": created_str,
+                                "last": created_str,
+                            }
+                        else:
+                            if created_str < date_range[key]["first"]:
+                                date_range[key]["first"] = created_str
+                            if created_str > date_range[key]["last"]:
+                                date_range[key]["last"] = created_str
 
         stats = []
         for lv in TAG_LEVELS:
             for tag, count in counters[lv].most_common():
-                stats.append(TagStats(tag=tag, level=lv, count=count))
+                dr = date_range.get((lv, tag))
+                stats.append(TagStats(
+                    tag=tag,
+                    level=lv,
+                    count=count,
+                    first_seen=dr["first"] if dr else None,
+                    last_seen=dr["last"] if dr else None,
+                ))
         return stats
+
+    @staticmethod
+    def _find_orphan_tags(tag_stats: list[TagStats]) -> list[TagStats]:
+        """
+        检测孤立标签：仅使用 1 次且不在 tag_synonyms.json 映射中。
+
+        这些标签可能是 AI 自创的非标准标签或拼写错误，需要人工审核。
+        """
+        from blog_autopilot.tag_normalizer import _load_synonyms
+        mapping = _load_synonyms()
+
+        # 收集所有已映射的标签（canonical + synonym）
+        mapped_tags: set[str] = set()
+        for canonical, synonyms in mapping.items():
+            mapped_tags.add(canonical)
+            if isinstance(synonyms, list):
+                mapped_tags.update(synonyms)
+            else:
+                mapped_tags.add(synonyms)
+
+        orphans = []
+        for ts in tag_stats:
+            if ts.count == 1 and ts.tag not in mapped_tags:
+                orphans.append(ts)
+
+        if orphans:
+            logger.info(f"发现 {len(orphans)} 个孤立标签（待审核）")
+        return orphans
 
     @staticmethod
     def _build_cooccurrence(tag_rows: list[dict]) -> list[CooccurrencePair]:
@@ -246,7 +300,12 @@ class TagAuditor:
             if lv_stats:
                 lines.append(f"    {lv}:")
                 for ts in lv_stats:
-                    lines.append(f"      {ts.tag} ({ts.count})")
+                    date_info = ""
+                    if ts.first_seen or ts.last_seen:
+                        first = ts.first_seen or "?"
+                        last = ts.last_seen or "?"
+                        date_info = f"  [{first} ~ {last}]"
+                    lines.append(f"      {ts.tag} ({ts.count}){date_info}")
 
         # 共现对
         if report.top_cooccurrences:
@@ -265,6 +324,13 @@ class TagAuditor:
                 )
         elif report.embedding_available:
             lines.append("\n  [同义词合并建议] 未发现语义近义词")
+
+        # 孤立标签（待审核）
+        if report.orphan_tags:
+            lines.append(f"\n  [孤立标签 — 待审核] ({len(report.orphan_tags)} 个)")
+            for ts in report.orphan_tags:
+                last = f"  最后使用: {ts.last_seen}" if ts.last_seen else ""
+                lines.append(f"    {ts.tag} ({ts.level}){last}")
 
         lines.append("")
         lines.append("=" * 60)
@@ -327,7 +393,10 @@ class TagAuditor:
             "unique_tag_count": report.unique_tag_count,
             "embedding_available": report.embedding_available,
             "tag_stats": [
-                {"tag": s.tag, "level": s.level, "count": s.count}
+                {
+                    "tag": s.tag, "level": s.level, "count": s.count,
+                    "first_seen": s.first_seen, "last_seen": s.last_seen,
+                }
                 for s in report.tag_stats
             ],
             "top_cooccurrences": [
@@ -343,6 +412,13 @@ class TagAuditor:
                     "already_mapped": s.already_mapped,
                 }
                 for s in report.suggestions
+            ],
+            "orphan_tags": [
+                {
+                    "tag": s.tag, "level": s.level,
+                    "first_seen": s.first_seen, "last_seen": s.last_seen,
+                }
+                for s in report.orphan_tags
             ],
         }
         return json.dumps(data, ensure_ascii=False, indent=2)

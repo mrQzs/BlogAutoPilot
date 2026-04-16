@@ -13,10 +13,12 @@ from blog_autopilot.config import Settings
 from blog_autopilot.constants import (
     CONTENT_EXCERPT_MAX_LENGTH,
     DUPLICATE_SIMILARITY_THRESHOLD,
+    HEALTH_CHECK_INTERVAL,
     POLL_INTERVAL,
     QUALITY_MAX_REWRITE_ATTEMPTS,
     SURVEY_CHECK_INTERVAL,
     TAG_CONSISTENCY_WARN_THRESHOLD,
+    WP_TAXONOMY_SYNC_INTERVAL,
 )
 from blog_autopilot.exceptions import (
     AIAPIError,
@@ -37,6 +39,7 @@ from blog_autopilot.publisher import (
     ensure_wp_tags,
     get_wp_post_content,
     post_to_wordpress,
+    sync_wp_taxonomy_mappings,
     test_wp_connection,
     update_wp_post_content,
 )
@@ -44,6 +47,22 @@ from blog_autopilot.scanner import scan_input_directory
 from blog_autopilot.telegram import send_to_telegram, test_tg_connection
 
 logger = logging.getLogger("blog-autopilot")
+
+
+def _probe_ai_api(
+    api_key: str,
+    api_base: str,
+    headers: dict | None = None,
+) -> None:
+    """通过 models.list 端点检测 AI API 连通性，失败抛出异常"""
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=api_base,
+        default_headers=headers or {},
+    )
+    client.models.list(timeout=15)
 
 
 class Pipeline:
@@ -65,6 +84,10 @@ class Pipeline:
         self._embedding_client = None
         self._ingestor = None
         self._init_association_components()
+
+        # 周期同步缓存
+        self._last_wp_taxonomy_sync = 0.0
+        self._wp_taxonomy_map_cache = None
 
     def _init_association_components(self) -> None:
         """尝试初始化关联系统组件（数据库未配置时静默跳过）"""
@@ -385,17 +408,42 @@ class Pipeline:
             logger.warning(f"SEO 提取失败（不影响发布）: {e}")
 
         # ③.6 WordPress 标签创建（失败不阻断发布）
+        wp_category_id = meta.category_id
         try:
+            from blog_autopilot.tag_registry import (
+                derive_wp_tags_from_internal,
+                derive_wp_taxonomy_from_internal,
+            )
+
             all_wp_names = list(seo.wp_tags) if seo and seo.wp_tags else []
-            # 合并内部标签（wp_mapping=true）
+
+            mapped_category_id = None
+            mapped_topic_tag_ids: list[int] = []
             if pre_tags:
-                from blog_autopilot.tag_registry import derive_wp_tags_from_internal
+                taxonomy_mapping = derive_wp_taxonomy_from_internal(pre_tags)
+                taxonomy_sync = sync_wp_taxonomy_mappings(
+                    category_mapping=taxonomy_mapping.get("category"),
+                    tag_mappings=taxonomy_mapping.get("tags", []),
+                    settings=self._settings.wp,
+                    taxonomy_map=self._wp_taxonomy_map_cache,
+                )
+                self._wp_taxonomy_map_cache = taxonomy_sync.get("taxonomy_map")
+                mapped_category_id = taxonomy_sync.get("category_id")
+                mapped_topic_tag_ids = taxonomy_sync.get("tag_ids", [])
+
                 internal_wp_names = derive_wp_tags_from_internal(pre_tags)
                 for t in internal_wp_names:
                     if t not in all_wp_names:
                         all_wp_names.append(t)
+
+            if mapped_category_id is not None:
+                wp_category_id = mapped_category_id
+
             if all_wp_names:
-                wp_tag_ids = ensure_wp_tags(tuple(all_wp_names), self._settings.wp)
+                ensured_tag_ids = ensure_wp_tags(tuple(all_wp_names), self._settings.wp)
+                wp_tag_ids = list(dict.fromkeys(mapped_topic_tag_ids + ensured_tag_ids))
+            elif mapped_topic_tag_ids:
+                wp_tag_ids = mapped_topic_tag_ids
         except Exception as e:
             logger.warning(f"WordPress 标签创建失败（不影响发布）: {e}")
 
@@ -442,7 +490,7 @@ class Pipeline:
                 title=article.title,
                 content=article.html_body,
                 settings=self._settings.wp,
-                category_id=meta.category_id,
+                category_id=wp_category_id,
                 excerpt=seo.meta_description if seo else None,
                 slug=seo.slug if seo else None,
                 tag_ids=wp_tag_ids,
@@ -870,6 +918,27 @@ class Pipeline:
         except Exception as e:
             logger.warning(f"综述 SEO 提取失败: {e}")
 
+        # 封面图生成+上传（失败不阻断发布）
+        featured_media_id = None
+        cover_image_data = None
+        if self._cover_image_generator:
+            try:
+                from blog_autopilot.cover_image import upload_media_to_wordpress
+
+                cover_image_data = self._cover_image_generator.generate_image(
+                    result.title, result.html_body,
+                )
+                slug = seo.slug if seo else "survey"
+                featured_media_id = upload_media_to_wordpress(
+                    cover_image_data,
+                    f"cover-{slug}.png",
+                    self._settings.wp,
+                )
+            except CoverImageError as e:
+                logger.warning(f"综述封面图生成/上传失败（不影响发布）: {e}")
+            except Exception as e:
+                logger.warning(f"综述封面图步骤异常（不影响发布）: {e}")
+
         # 发布到 WordPress Featured 分类 (ID 39)
         pub = post_to_wordpress(
             title=result.title,
@@ -879,6 +948,7 @@ class Pipeline:
             excerpt=seo.meta_description if seo else None,
             slug=seo.slug if seo else None,
             tag_ids=wp_tag_ids,
+            featured_media=featured_media_id,
         )
         logger.info(f"综述发布成功: {pub.url}")
 
@@ -890,13 +960,119 @@ class Pipeline:
             source_count=result.source_count,
         )
 
-        # 推广文案 + Telegram 推送
+        # 推广文案 + Telegram 推送（纯文本，依赖 og:image 链接预览显示封面图）
         try:
             promo = self._writer.generate_promo(result.title, result.html_body)
-            send_to_telegram(promo, self._settings.tg)
+            send_to_telegram(promo, pub.url, self._settings.tg)
             logger.info("综述推广推送成功")
         except (TelegramError, AIAPIError) as e:
             logger.warning(f"综述推广推送失败: {e}")
+
+    def _check_api_health(self) -> None:
+        """检测所有配置的外部 API 服务，发现异常时发送 TG 告警"""
+        from datetime import datetime
+
+        ai = self._settings.ai
+        failures: list[str] = []
+        total = 0
+
+        # 1. WordPress
+        total += 1
+        try:
+            test_wp_connection(self._settings.wp)
+        except Exception as e:
+            failures.append(f"WordPress: {e}")
+
+        # 2. Telegram
+        total += 1
+        try:
+            test_tg_connection(self._settings.tg)
+        except Exception as e:
+            failures.append(f"Telegram: {e}")
+
+        # 3. 主 AI API（Writer/Promo）
+        total += 1
+        try:
+            _probe_ai_api(
+                api_key=ai.api_key.get_secret_value(),
+                api_base=ai.api_base,
+                headers=ai.default_headers,
+            )
+        except Exception as e:
+            failures.append(f"主 AI API: {e}")
+
+        # 4. Reviewer API（仅当与主 API 不同时）
+        if ai.reviewer_api_base and ai.reviewer_api_base != ai.api_base:
+            total += 1
+            try:
+                reviewer_key = (
+                    ai.reviewer_api_key.get_secret_value()
+                    if ai.reviewer_api_key
+                    else ai.api_key.get_secret_value()
+                )
+                _probe_ai_api(
+                    api_key=reviewer_key,
+                    api_base=ai.reviewer_api_base,
+                    headers=ai.reviewer_headers or ai.default_headers,
+                )
+            except Exception as e:
+                failures.append(f"Reviewer API: {e}")
+
+        # 5. 数据库
+        if self._database is not None:
+            total += 1
+            try:
+                self._database.test_connection()
+            except Exception as e:
+                failures.append(f"数据库: {e}")
+
+
+        if not failures:
+            logger.info(f"API 健康检测通过 ({total}/{total} 项正常)")
+            return
+
+        now_str = datetime.now().strftime("%H:%M")
+        failure_lines = "\n".join(f"• {f}" for f in failures)
+        logger.warning(f"API 健康检测发现问题:\n{failure_lines}")
+
+        alert_msg = (
+            f"⚠️ API 健康检测告警\n\n"
+            f"以下服务异常 (检测时间 {now_str}):\n"
+            f"{failure_lines}\n\n"
+            f"请及时排查。"
+        )
+        try:
+            send_to_telegram(alert_msg, "", self._settings.tg)
+        except Exception as tg_err:
+            logger.warning(f"健康检测告警 TG 发送失败: {tg_err}")
+
+    def _sync_wp_taxonomy_if_needed(self, now: float | None = None) -> None:
+        """按配置间隔执行 WordPress taxonomy 同步（失败不阻断）。"""
+        if not self._settings.wp.taxonomy_sync_enabled:
+            return
+
+        current = now if now is not None else time.time()
+        configured_interval = self._settings.wp.taxonomy_sync_interval_minutes * 60
+        interval = configured_interval or WP_TAXONOMY_SYNC_INTERVAL
+        if current - self._last_wp_taxonomy_sync < interval:
+            return
+
+        self._last_wp_taxonomy_sync = current
+
+        try:
+            from blog_autopilot.tag_registry import get_syncable_wordpress_terms
+            from blog_autopilot.publisher import _fetch_wp_taxonomy_map
+
+            sync_terms = get_syncable_wordpress_terms()
+            self._wp_taxonomy_map_cache = _fetch_wp_taxonomy_map(self._settings.wp)
+            logger.info(
+                "WordPress taxonomy 周期同步完成: "
+                f"categories={len(sync_terms.get('categories', []))}, "
+                f"tags={len(sync_terms.get('tags', []))}"
+            )
+        except Exception as e:
+            logger.warning(f"WordPress taxonomy 周期同步失败（不影响主流程）: {e}")
+
 
     def run(self, once: bool = False) -> None:
         """主循环入口"""
@@ -931,11 +1107,12 @@ class Pipeline:
             logger.info("  质量审核: 未启用")
 
         if once:
+            self._sync_wp_taxonomy_if_needed()
             count = self.scan_and_process()
             logger.info(f"单次处理完成, 共处理 {count} 篇文章")
             return
 
-        last_survey_check = 0.0
+        last_health_check = 0.0
         while True:
             try:
                 self.scan_and_process()
@@ -945,11 +1122,11 @@ class Pipeline:
             except Exception as e:
                 logger.error(f"主循环异常: {e}", exc_info=True)
 
-            # 每 24 小时检查一次综述生成
             now = time.time()
-            if now - last_survey_check >= SURVEY_CHECK_INTERVAL:
-                last_survey_check = now
-                self._check_and_generate_surveys()
+            self._sync_wp_taxonomy_if_needed(now)
+            if now - last_health_check >= HEALTH_CHECK_INTERVAL:
+                last_health_check = now
+                self._check_api_health()
 
             time.sleep(POLL_INTERVAL)
 

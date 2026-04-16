@@ -114,17 +114,89 @@ def _build_auth_header(settings: WordPressSettings) -> dict[str, str]:
     }
 
 
-def _get_tags_url(posts_url: str) -> str:
-    """从 posts URL 推导 tags endpoint URL"""
+def _get_taxonomy_url(posts_url: str, taxonomy: str) -> str:
+    """从 posts URL 推导 taxonomy endpoint URL。"""
     parsed = urlparse(posts_url)
     qs = parse_qs(parsed.query)
     if "rest_route" in qs:
-        # ?rest_route=/wp/v2/posts → ?rest_route=/wp/v2/tags
-        route = qs["rest_route"][0].rsplit("/", 1)[0] + "/tags"
+        route = qs["rest_route"][0].rsplit("/", 1)[0] + f"/{taxonomy}"
         new_qs = urlencode({"rest_route": route})
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_qs}"
-    # Pretty permalink: .../wp-json/wp/v2/posts → .../wp-json/wp/v2/tags
-    return posts_url.rsplit("/", 1)[0] + "/tags"
+    return posts_url.rsplit("/", 1)[0] + f"/{taxonomy}"
+
+
+def _get_categories_url(posts_url: str) -> str:
+    """从 posts URL 推导 categories endpoint URL"""
+    return _get_taxonomy_url(posts_url, "categories")
+
+
+def _get_tags_url(posts_url: str) -> str:
+    """从 posts URL 推导 tags endpoint URL"""
+    return _get_taxonomy_url(posts_url, "tags")
+
+
+def _fetch_wp_terms(
+    terms_url: str,
+    headers: dict[str, str],
+) -> list[dict]:
+    """拉取 WordPress taxonomy terms（自动分页）。"""
+    page = 1
+    terms: list[dict] = []
+    while True:
+        resp = requests.get(
+            terms_url,
+            headers=headers,
+            params={"per_page": 100, "page": page},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            raise WordPressError(
+                f"taxonomy 拉取失败 ({resp.status_code}): {terms_url}",
+                status_code=resp.status_code,
+            )
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            break
+        terms.extend(data)
+        if len(data) < 100:
+            break
+        page += 1
+    return terms
+
+
+def _fetch_wp_taxonomy_map(settings: WordPressSettings) -> dict:
+    """拉取 WordPress categories/tags 并构建 name/slug 到 ID 的映射。"""
+    headers = _build_auth_header(settings)
+    categories = _fetch_wp_terms(_get_categories_url(settings.url), headers)
+    tags = _fetch_wp_terms(_get_tags_url(settings.url), headers)
+
+    category_slug_to_id = {
+        str(item.get("slug", "")): int(item["id"])
+        for item in categories
+        if item.get("slug") and item.get("id")
+    }
+    category_name_to_id = {
+        str(item.get("name", "")): int(item["id"])
+        for item in categories
+        if item.get("name") and item.get("id")
+    }
+    tag_slug_to_id = {
+        str(item.get("slug", "")): int(item["id"])
+        for item in tags
+        if item.get("slug") and item.get("id")
+    }
+    tag_name_to_id = {
+        str(item.get("name", "")): int(item["id"])
+        for item in tags
+        if item.get("name") and item.get("id")
+    }
+
+    return {
+        "category_slug_to_id": category_slug_to_id,
+        "category_name_to_id": category_name_to_id,
+        "tag_slug_to_id": tag_slug_to_id,
+        "tag_name_to_id": tag_name_to_id,
+    }
 
 
 @retry(
@@ -133,21 +205,21 @@ def _get_tags_url(posts_url: str) -> str:
     retry=retry_if_result(_is_server_error),
     reraise=True,
 )
-def _create_or_get_wp_tag(
-    tag_name: str,
-    tags_url: str,
+def _create_or_get_wp_term(
+    name: str,
+    terms_url: str,
     headers: dict[str, str],
+    slug: str | None = None,
 ) -> int | None:
-    """
-    创建或获取 WordPress 标签 ID。
-
-    返回标签 ID，失败返回 None（不阻断流程）。
-    """
+    """创建或获取 WordPress term（tag/category 通用）。"""
     try:
+        payload = {"name": name}
+        if slug:
+            payload["slug"] = slug
         resp = requests.post(
-            tags_url,
+            terms_url,
             headers=headers,
-            json={"name": tag_name},
+            json=payload,
             timeout=15,
         )
 
@@ -155,16 +227,15 @@ def _create_or_get_wp_tag(
             return resp.json()["id"]
 
         if resp.status_code == 400:
-            # term_exists: 标签已存在
             data = resp.json()
             term_id = data.get("data", {}).get("term_id")
             if term_id:
                 return int(term_id)
-            # 回退：搜索标签
+
             search_resp = requests.get(
-                tags_url,
+                terms_url,
                 headers=headers,
-                params={"search": tag_name, "per_page": 1},
+                params={"search": name, "per_page": 1},
                 timeout=10,
             )
             if search_resp.status_code == 200:
@@ -174,15 +245,128 @@ def _create_or_get_wp_tag(
             return None
 
         if resp.status_code >= 500:
-            logger.warning(f"标签创建服务器错误 ({resp.status_code}), 将重试...")
-            return None  # 触发 tenacity 重试
+            logger.warning(f"term 创建服务器错误 ({resp.status_code}), 将重试...")
+            return None
 
-        logger.warning(f"标签创建失败 ({resp.status_code}): {tag_name}")
+        logger.warning(f"term 创建失败 ({resp.status_code}): {name}")
         return None
 
     except requests.exceptions.RequestException as e:
-        logger.warning(f"标签创建请求异常: {tag_name} - {e}")
+        logger.warning(f"term 创建请求异常: {name} - {e}")
         return None
+
+
+def _resolve_wp_category_id(
+    category_mapping: dict,
+    taxonomy_map: dict,
+    settings: WordPressSettings,
+) -> int | None:
+    """根据映射解析/创建 WordPress 分类 ID。"""
+    category_id = category_mapping.get("category_id")
+    if category_id:
+        return int(category_id)
+
+    category_slug = category_mapping.get("category_slug")
+    if category_slug and category_slug in taxonomy_map["category_slug_to_id"]:
+        return taxonomy_map["category_slug_to_id"][category_slug]
+
+    category_name = category_mapping.get("name")
+    if category_name and category_name in taxonomy_map["category_name_to_id"]:
+        return taxonomy_map["category_name_to_id"][category_name]
+
+    if category_mapping.get("auto_create") and category_name:
+        headers = _build_auth_header(settings)
+        created = _create_or_get_wp_term(
+            name=category_name,
+            terms_url=_get_categories_url(settings.url),
+            headers=headers,
+            slug=category_slug,
+        )
+        if created:
+            taxonomy_map["category_name_to_id"][category_name] = int(created)
+            if category_slug:
+                taxonomy_map["category_slug_to_id"][category_slug] = int(created)
+            return int(created)
+
+    return None
+
+
+def _resolve_wp_tag_id(
+    tag_mapping: dict,
+    taxonomy_map: dict,
+    settings: WordPressSettings,
+) -> int | None:
+    """根据映射解析/创建 WordPress 标签 ID。"""
+    tag_id = tag_mapping.get("tag_id")
+    if tag_id:
+        return int(tag_id)
+
+    tag_slug = tag_mapping.get("tag_slug")
+    if tag_slug and tag_slug in taxonomy_map["tag_slug_to_id"]:
+        return taxonomy_map["tag_slug_to_id"][tag_slug]
+
+    tag_name = tag_mapping.get("name")
+    if tag_name and tag_name in taxonomy_map["tag_name_to_id"]:
+        return taxonomy_map["tag_name_to_id"][tag_name]
+
+    if tag_mapping.get("auto_create") and tag_name:
+        headers = _build_auth_header(settings)
+        created = _create_or_get_wp_term(
+            name=tag_name,
+            terms_url=_get_tags_url(settings.url),
+            headers=headers,
+            slug=tag_slug,
+        )
+        if created:
+            taxonomy_map["tag_name_to_id"][tag_name] = int(created)
+            if tag_slug:
+                taxonomy_map["tag_slug_to_id"][tag_slug] = int(created)
+            return int(created)
+
+    return None
+
+
+def sync_wp_taxonomy_mappings(
+    category_mapping: dict | None,
+    tag_mappings: list[dict],
+    settings: WordPressSettings,
+    taxonomy_map: dict | None = None,
+) -> dict:
+    """
+    同步并解析 taxonomy 映射。
+
+    返回: {"category_id": int|None, "tag_ids": list[int], "taxonomy_map": dict|None}
+    失败时降级返回 None/空列表，不抛错阻断发布。
+    """
+    try:
+        resolved_taxonomy_map = taxonomy_map or _fetch_wp_taxonomy_map(settings)
+    except Exception as e:
+        logger.warning(f"WordPress taxonomy 同步失败（降级）: {e}")
+        return {"category_id": None, "tag_ids": [], "taxonomy_map": None}
+
+    resolved_category_id = None
+    if category_mapping:
+        resolved_category_id = _resolve_wp_category_id(
+            category_mapping=category_mapping,
+            taxonomy_map=resolved_taxonomy_map,
+            settings=settings,
+        )
+
+    resolved_tag_ids: list[int] = []
+    for mapping in tag_mappings:
+        tag_id = _resolve_wp_tag_id(
+            tag_mapping=mapping,
+            taxonomy_map=resolved_taxonomy_map,
+            settings=settings,
+        )
+        if tag_id is not None:
+            resolved_tag_ids.append(tag_id)
+
+    return {
+        "category_id": resolved_category_id,
+        "tag_ids": resolved_tag_ids,
+        "taxonomy_map": resolved_taxonomy_map,
+    }
 
 
 def ensure_wp_tags(
@@ -199,7 +383,7 @@ def ensure_wp_tags(
     tag_ids = []
 
     for name in tag_names:
-        tag_id = _create_or_get_wp_tag(name, tags_url, headers)
+        tag_id = _create_or_get_wp_term(name=name, terms_url=tags_url, headers=headers)
         if tag_id is not None:
             tag_ids.append(tag_id)
         else:

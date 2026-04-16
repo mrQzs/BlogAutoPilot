@@ -1070,7 +1070,9 @@ class Database:
         sci_ph = ",".join(["%s"] * len(sciences))
         top_ph = ",".join(["%s"] * len(topics))
         sql = f"""
-            SELECT id, title, summary, tg_promo, url, created_at
+            SELECT id, title, summary, tg_promo, url, created_at,
+                   tag_magazine, tag_science, tag_topic, tag_content,
+                   embedding
             FROM articles
             WHERE tag_magazine = %s
               AND tag_science IN ({sci_ph})

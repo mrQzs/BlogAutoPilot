@@ -253,7 +253,10 @@ class TestRewriteWithFeedback:
 
     def test_rewrite_produces_article(self, ai_settings, sample_quality_review):
         writer = AIWriter(ai_settings)
-        mock_response = "新标题\n<p>重写后的正文内容</p>"
+        mock_response = (
+            "新标题\n<p>重写后的正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
 
         with patch.object(writer, "call_claude", return_value=mock_response):
             result = writer.rewrite_with_feedback(
@@ -337,7 +340,10 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         review_resp = _make_valid_review_json(
             consistency=9, readability=8, ai_cliche=8,
         )
@@ -358,7 +364,10 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         review_resp = _make_valid_review_json(
             consistency=2, readability=2, ai_cliche=2,
         )
@@ -381,11 +390,17 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         rewrite_review = _make_valid_review_json(
             consistency=6, readability=6, ai_cliche=6,
         )
-        rewrite_resp = "改进标题\n<p>改进后的正文</p>"
+        rewrite_resp = (
+            "改进标题\n<p>改进后的正文</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         pass_review = _make_valid_review_json(
             consistency=9, readability=8, ai_cliche=8,
         )
@@ -411,11 +426,17 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         rewrite_review = _make_valid_review_json(
             consistency=6, readability=6, ai_cliche=6,
         )
-        rewrite_resp = "改进标题\n<p>改进后的正文</p>"
+        rewrite_resp = (
+            "改进标题\n<p>改进后的正文</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
 
         # article → review(rewrite) → rewrite → review(rewrite) → rewrite → review(rewrite)
         with patch.object(
@@ -439,11 +460,17 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         rewrite_review = _make_valid_review_json(
             consistency=6, readability=6, ai_cliche=6,
         )
-        rewrite_resp = "改进标题\n<p>改进后的正文</p>"
+        rewrite_resp = (
+            "改进标题\n<p>改进后的正文</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         draft_review = _make_valid_review_json(
             consistency=2, readability=2, ai_cliche=2,
         )
@@ -469,7 +496,10 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs, review_enabled=False)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         seo_resp = "not valid json"
         promo_resp = "推广文案"
 
@@ -490,7 +520,10 @@ class TestPipelineQualityReview:
         pipeline = self._make_pipeline(ai_settings, tmp_dirs)
         task = self._make_task(tmp_dirs)
 
-        article_resp = "测试标题\n<p>文章正文内容</p>"
+        article_resp = (
+            "测试标题\n<p>文章正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
         promo_resp = "推广文案"
 
         call_count = 0
@@ -797,7 +830,10 @@ class TestRewriteWithEnhancedFeedback:
 
     def test_rewrite_with_previous_review(self, ai_settings, sample_quality_review):
         writer = AIWriter(ai_settings)
-        mock_response = "新标题\n<p>重写后的正文内容</p>"
+        mock_response = (
+            "新标题\n<p>重写后的正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
 
         with patch.object(writer, "call_claude", return_value=mock_response):
             result = writer.rewrite_with_feedback(
@@ -812,7 +848,10 @@ class TestRewriteWithEnhancedFeedback:
 
     def test_rewrite_first_attempt_no_progressive(self, ai_settings, sample_quality_review):
         writer = AIWriter(ai_settings)
-        mock_response = "新标题\n<p>重写后的正文内容</p>"
+        mock_response = (
+            "新标题\n<p>重写后的正文内容</p>\n"
+            + "<p>这是一段足够长的测试正文，用于通过最小长度校验。</p>\n" * 10
+        )
 
         with patch.object(writer, "call_claude", return_value=mock_response) as mock_call:
             writer.rewrite_with_feedback(

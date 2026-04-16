@@ -3,18 +3,21 @@
 import logging
 from itertools import combinations
 
+from collections import Counter
+
 from blog_autopilot.ai_writer import AIWriter
 from blog_autopilot.config import Settings
 from blog_autopilot.constants import (
     SURVEY_LOOKBACK_DAYS,
     SURVEY_MAX_SOURCE_ARTICLES,
     SURVEY_MIN_ARTICLES,
+    SURVEY_MIN_BODY_LENGTH,
     SURVEY_SCIENCE_SIMILARITY,
     SURVEY_TOPIC_SIMILARITY,
 )
 from blog_autopilot.db import Database
 from blog_autopilot.exceptions import SurveyGenerationError
-from blog_autopilot.models import SurveyResult
+from blog_autopilot.models import SurveyResult, TagSet
 
 logger = logging.getLogger("blog-autopilot")
 
@@ -268,8 +271,8 @@ class SurveyGenerator:
         source_text = self._format_source_articles(articles)
         topic_tags = f"{tag_mag} / {tag_sci} / {' + '.join(tag_tops)}"
 
-        system_prompt = self._writer._load_prompt("survey_system.txt")
-        user_template = self._writer._load_prompt("survey_user.txt")
+        system_prompt = self._writer._load_prompt("writer_synthesis_system.txt")
+        user_template = self._writer._load_prompt("writer_synthesis_user.txt")
         user_prompt = user_template.format(
             topic_tags=topic_tags,
             article_count=len(articles),
@@ -285,6 +288,18 @@ class SurveyGenerator:
 
         article = self._writer._parse_article_response(response)
 
+        if len(article.html_body) < SURVEY_MIN_BODY_LENGTH:
+            raise SurveyGenerationError(
+                f"综述正文过短 ({len(article.html_body)} 字符 < {SURVEY_MIN_BODY_LENGTH})，"
+                f"疑似生成失败"
+            )
+
+        # 标签合并（并集 + 频次加权）
+        merged_tags = self._merge_tags(articles)
+
+        # Embedding 均值计算
+        merged_embedding = self._compute_mean_embedding(articles)
+
         logger.info(
             f"综述生成完成 | 标题: {article.title} | "
             f"源文章: {len(articles)} 篇"
@@ -296,7 +311,62 @@ class SurveyGenerator:
             tag_magazine=tag_mag,
             tag_science=tag_sci,
             tag_topic=tag_tops[0],
+            merged_tags=merged_tags,
+            merged_embedding=merged_embedding,
         )
+
+    @staticmethod
+    def _merge_tags(articles: list[dict]) -> TagSet | None:
+        """
+        合并源文章标签：各层级取频率最高的值。
+
+        统计所有源文章在 magazine/science/topic/content 四个层级
+        的标签出现频次，取每个层级中频率最高的标签作为综述文章的标签。
+        """
+        levels = ("tag_magazine", "tag_science", "tag_topic", "tag_content")
+        counters: dict[str, Counter] = {lv: Counter() for lv in levels}
+
+        for art in articles:
+            for lv in levels:
+                val = art.get(lv)
+                if val:
+                    counters[lv][val] += 1
+
+        # 每层级必须至少有一个有效值
+        if not all(counters[lv] for lv in levels):
+            return None
+
+        return TagSet(
+            tag_magazine=counters["tag_magazine"].most_common(1)[0][0],
+            tag_science=counters["tag_science"].most_common(1)[0][0],
+            tag_topic=counters["tag_topic"].most_common(1)[0][0],
+            tag_content=counters["tag_content"].most_common(1)[0][0],
+        )
+
+    @staticmethod
+    def _compute_mean_embedding(
+        articles: list[dict],
+    ) -> tuple[float, ...] | None:
+        """
+        计算源文章 embedding 向量的均值。
+
+        收集所有有效 embedding，逐维度求平均，作为综述文章的 embedding。
+        无有效 embedding 时返回 None。
+        """
+        embeddings = [
+            art["embedding"] for art in articles
+            if art.get("embedding") is not None
+        ]
+        if not embeddings:
+            return None
+
+        dim = len(embeddings[0])
+        n = len(embeddings)
+        mean = [
+            sum(emb[i] for emb in embeddings) / n
+            for i in range(dim)
+        ]
+        return tuple(mean)
 
     @staticmethod
     def _format_source_articles(articles: list[dict]) -> str:

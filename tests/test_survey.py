@@ -4,7 +4,31 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from blog_autopilot.exceptions import SurveyGenerationError
-from blog_autopilot.models import SurveyResult
+from blog_autopilot.models import SurveyResult, TagSet
+
+
+def _make_article(
+    idx: int,
+    tag_magazine: str = "技术",
+    tag_science: str = "AI",
+    tag_topic: str = "大模型",
+    tag_content: str = "GPT技术突破",
+    embedding: list[float] | None = None,
+) -> dict:
+    """构造测试用源文章 dict"""
+    return {
+        "id": f"a{idx}",
+        "title": f"文章{idx}",
+        "summary": f"摘要{idx}",
+        "tg_promo": f"推广{idx}",
+        "url": f"https://blog/{idx}",
+        "created_at": None,
+        "tag_magazine": tag_magazine,
+        "tag_science": tag_science,
+        "tag_topic": tag_topic,
+        "tag_content": tag_content,
+        "embedding": embedding,
+    }
 
 
 class TestSurveyResult:
@@ -22,6 +46,29 @@ class TestSurveyResult:
         assert result.title == "综述标题"
         assert result.source_count == 5
         assert result.tag_magazine == "技术周刊"
+        assert result.merged_tags is None
+        assert result.merged_embedding is None
+
+    def test_with_merged_fields(self):
+        tags = TagSet(
+            tag_magazine="技术",
+            tag_science="AI",
+            tag_topic="大模型",
+            tag_content="GPT技术突破",
+        )
+        emb = (0.1, 0.2, 0.3)
+        result = SurveyResult(
+            title="综述标题",
+            html_body="<p>正文</p>",
+            source_count=5,
+            tag_magazine="技术",
+            tag_science="AI",
+            tag_topic="大模型",
+            merged_tags=tags,
+            merged_embedding=emb,
+        )
+        assert result.merged_tags == tags
+        assert result.merged_embedding == (0.1, 0.2, 0.3)
 
     def test_frozen(self):
         result = SurveyResult(
@@ -90,9 +137,9 @@ class TestDetectCandidates:
         mock_db = mock_db_cls.return_value
         mock_db.find_survey_candidates.return_value = [
             {"tag_magazine": "技术", "tag_science": "AI",
-             "tag_topic": "图像去噪", "article_count": 2},
+             "tag_topic": "图像去噪", "article_count": 3},
             {"tag_magazine": "技术", "tag_science": "AI",
-             "tag_topic": "去噪方法", "article_count": 2},
+             "tag_topic": "去噪方法", "article_count": 3},
         ]
         from blog_autopilot.survey import SurveyGenerator
         settings = MagicMock()
@@ -100,16 +147,16 @@ class TestDetectCandidates:
         settings.embedding = None
         gen = SurveyGenerator(settings)
 
-        # 注入 mock embedding
+        # 注入 mock embedding（代码会拼接 "AI 图像去噪" 上下文前缀）
         mock_emb = MagicMock()
         mock_emb.get_embedding.side_effect = lambda t: (
-            [1.0, 0.0, 0.0] if t == "图像去噪" else [0.98, 0.1, 0.0]
+            [1.0, 0.0, 0.0] if "图像去噪" in t else [0.98, 0.1, 0.0]
         )
         gen._embedding_client = mock_emb
 
         candidates = gen.detect_candidates()
         assert len(candidates) == 1
-        assert candidates[0]["article_count"] == 4
+        assert candidates[0]["article_count"] == 6
         assert set(candidates[0]["tag_topics"]) == {"图像去噪", "去噪方法"}
 
     @patch("blog_autopilot.survey.Database")
@@ -137,12 +184,11 @@ class TestGenerateSurvey:
     def test_success(self, mock_writer_cls, mock_db_cls):
         mock_db = mock_db_cls.return_value
         mock_db.fetch_articles_by_tags.return_value = [
-            {"id": "a1", "title": "文章1", "summary": "摘要1",
-             "tg_promo": "推广1", "url": "https://blog/1", "created_at": None},
-            {"id": "a2", "title": "文章2", "summary": "摘要2",
-             "tg_promo": "推广2", "url": "https://blog/2", "created_at": None},
-            {"id": "a3", "title": "文章3", "summary": "摘要3",
-             "tg_promo": "推广3", "url": "https://blog/3", "created_at": None},
+            _make_article(1, embedding=[1.0, 0.0, 0.0]),
+            _make_article(2, embedding=[0.0, 1.0, 0.0]),
+            _make_article(3, embedding=[0.0, 0.0, 1.0]),
+            _make_article(4, embedding=[1.0, 1.0, 0.0]),
+            _make_article(5, embedding=[0.0, 1.0, 1.0]),
         ]
 
         from blog_autopilot.models import ArticleResult
@@ -150,7 +196,8 @@ class TestGenerateSurvey:
         mock_writer._load_prompt.return_value = "prompt {topic_tags} {article_count} {source_articles}"
         mock_writer.call_claude.return_value = "综述标题\n<p>综述正文</p>"
         mock_writer._parse_article_response.return_value = ArticleResult(
-            title="综述标题", html_body="<p>综述正文</p>",
+            title="综述标题",
+            html_body="<p>综述正文</p>\n" + "<p>测试段落内容，用于通过综述最小长度校验。</p>\n" * 30,
         )
 
         from blog_autopilot.survey import SurveyGenerator
@@ -162,15 +209,28 @@ class TestGenerateSurvey:
         candidate = {
             "tag_magazine": "技术", "tag_science": "AI",
             "tag_topic": "大模型", "tag_topics": ["大模型"],
-            "article_count": 3,
+            "article_count": 5,
         }
         result = gen.generate(candidate)
 
         assert result.title == "综述标题"
-        assert result.source_count == 3
+        assert result.source_count == 5
         assert result.tag_magazine == "技术"
-        # fetch_articles_by_tags 收到 topic 列表
-        mock_db.fetch_articles_by_tags.assert_called_once()
+        # 标签合并验证
+        assert result.merged_tags is not None
+        assert result.merged_tags.tag_magazine == "技术"
+        assert result.merged_tags.tag_science == "AI"
+        assert result.merged_tags.tag_topic == "大模型"
+        assert result.merged_tags.tag_content == "GPT技术突破"
+        # Embedding 均值验证
+        assert result.merged_embedding is not None
+        assert len(result.merged_embedding) == 3
+        assert abs(result.merged_embedding[0] - 2 / 5) < 1e-9
+        assert abs(result.merged_embedding[1] - 3 / 5) < 1e-9
+        assert abs(result.merged_embedding[2] - 2 / 5) < 1e-9
+        # prompt 文件名
+        mock_writer._load_prompt.assert_any_call("writer_synthesis_system.txt")
+        mock_writer._load_prompt.assert_any_call("writer_synthesis_user.txt")
 
     @patch("blog_autopilot.survey.Database")
     @patch("blog_autopilot.survey.AIWriter")
@@ -178,16 +238,16 @@ class TestGenerateSurvey:
         """多 topic 合并后生成综述"""
         mock_db = mock_db_cls.return_value
         mock_db.fetch_articles_by_tags.return_value = [
-            {"id": f"a{i}", "title": f"文章{i}", "summary": f"摘要{i}",
-             "tg_promo": f"推广{i}", "url": f"https://blog/{i}", "created_at": None}
-            for i in range(1, 5)
+            _make_article(i, tag_topic="图像去噪" if i <= 3 else "去噪方法")
+            for i in range(1, 6)
         ]
 
         from blog_autopilot.models import ArticleResult
         mock_writer = mock_writer_cls.return_value
         mock_writer._load_prompt.return_value = "prompt {topic_tags} {article_count} {source_articles}"
         mock_writer._parse_article_response.return_value = ArticleResult(
-            title="去噪综述", html_body="<p>综述</p>",
+            title="去噪综述",
+            html_body="<p>综述</p>\n" + "<p>测试段落内容，用于通过综述最小长度校验。</p>\n" * 30,
         )
 
         from blog_autopilot.survey import SurveyGenerator
@@ -200,10 +260,13 @@ class TestGenerateSurvey:
             "tag_magazine": "技术", "tag_science": "AI",
             "tag_topic": "图像去噪",
             "tag_topics": ["图像去噪", "去噪方法"],
-            "article_count": 4,
+            "article_count": 5,
         }
         result = gen.generate(candidate)
-        assert result.source_count == 4
+        assert result.source_count == 5
+        # 标签合并：频率最高的 topic 胜出（3 篇图像去噪 vs 2 篇去噪方法）
+        assert result.merged_tags is not None
+        assert result.merged_tags.tag_topic == "图像去噪"
         # 验证传了多个 topic
         call_args = mock_db.fetch_articles_by_tags.call_args
         assert call_args[0][2] == ["图像去噪", "去噪方法"]
@@ -213,8 +276,7 @@ class TestGenerateSurvey:
     def test_insufficient_articles(self, mock_writer_cls, mock_db_cls):
         mock_db = mock_db_cls.return_value
         mock_db.fetch_articles_by_tags.return_value = [
-            {"id": "a1", "title": "文章1", "summary": "摘要1",
-             "tg_promo": "推广1", "url": "https://blog/1", "created_at": None},
+            _make_article(1),
         ]
 
         from blog_autopilot.survey import SurveyGenerator
@@ -230,6 +292,95 @@ class TestGenerateSurvey:
         }
         with pytest.raises(SurveyGenerationError, match="源文章不足"):
             gen.generate(candidate)
+
+
+class TestMergeTags:
+    """标签合并逻辑验证"""
+
+    def test_uniform_tags(self):
+        """所有文章标签相同 → 取该值"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [_make_article(i) for i in range(1, 4)]
+        result = SurveyGenerator._merge_tags(articles)
+        assert result == TagSet(
+            tag_magazine="技术",
+            tag_science="AI",
+            tag_topic="大模型",
+            tag_content="GPT技术突破",
+        )
+
+    def test_frequency_weighting(self):
+        """频率最高的标签胜出"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [
+            _make_article(1, tag_science="AI"),
+            _make_article(2, tag_science="AI"),
+            _make_article(3, tag_science="机器学习"),
+        ]
+        result = SurveyGenerator._merge_tags(articles)
+        assert result.tag_science == "AI"
+
+    def test_missing_tag_returns_none(self):
+        """某层级标签全缺失 → 返回 None"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [
+            {"tag_magazine": "技术", "tag_science": "AI",
+             "tag_topic": "大模型", "tag_content": None},
+        ]
+        result = SurveyGenerator._merge_tags(articles)
+        assert result is None
+
+    def test_empty_articles(self):
+        """空文章列表 → 返回 None"""
+        from blog_autopilot.survey import SurveyGenerator
+        result = SurveyGenerator._merge_tags([])
+        assert result is None
+
+
+class TestComputeMeanEmbedding:
+    """Embedding 均值计算验证"""
+
+    def test_mean_of_two(self):
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [
+            _make_article(1, embedding=[2.0, 4.0]),
+            _make_article(2, embedding=[6.0, 8.0]),
+        ]
+        result = SurveyGenerator._compute_mean_embedding(articles)
+        assert result == (4.0, 6.0)
+
+    def test_skip_none_embeddings(self):
+        """忽略 embedding 为 None 的文章"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [
+            _make_article(1, embedding=[2.0, 4.0]),
+            _make_article(2, embedding=None),
+            _make_article(3, embedding=[6.0, 8.0]),
+        ]
+        result = SurveyGenerator._compute_mean_embedding(articles)
+        assert result == (4.0, 6.0)
+
+    def test_all_none_returns_none(self):
+        """所有 embedding 都为 None → 返回 None"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [
+            _make_article(1, embedding=None),
+            _make_article(2, embedding=None),
+        ]
+        result = SurveyGenerator._compute_mean_embedding(articles)
+        assert result is None
+
+    def test_empty_articles(self):
+        from blog_autopilot.survey import SurveyGenerator
+        result = SurveyGenerator._compute_mean_embedding([])
+        assert result is None
+
+    def test_single_article(self):
+        """单篇文章的 embedding 即为结果"""
+        from blog_autopilot.survey import SurveyGenerator
+        articles = [_make_article(1, embedding=[1.0, 2.0, 3.0])]
+        result = SurveyGenerator._compute_mean_embedding(articles)
+        assert result == (1.0, 2.0, 3.0)
 
 
 class TestFormatCandidates:

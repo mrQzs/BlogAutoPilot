@@ -19,7 +19,7 @@ from blog_autopilot.ai.review import (
     format_self_review_warning,
     identify_focus_areas,
 )
-from blog_autopilot.ai.sanitize import sanitize_input
+from blog_autopilot.ai.sanitize import check_ai_identity_leak, sanitize_input, strip_ai_identity_lines
 from blog_autopilot.ai.seo import _parse_seo_response, _validate_seo_metadata
 from blog_autopilot.ai.json_parser import _parse_json_response
 from blog_autopilot.ai.tagger import _parse_tagger_response, validate_tags
@@ -31,6 +31,7 @@ from blog_autopilot.config import AISettings
 from blog_autopilot.constants import (
     AI_PROMO_PREVIEW_LIMIT,
     AI_WRITER_INPUT_LIMIT,
+    ARTICLE_MIN_BODY_LENGTH,
     CATEGORY_TEMPERATURE,
     DEFAULT_TEMPERATURE,
     QUALITY_INPUT_PREVIEW_LIMIT,
@@ -81,6 +82,7 @@ class AIWriter:
     def __init__(self, settings: AISettings) -> None:
         self._settings = settings
         self._client: OpenAI | None = None
+        self._reviewer_client: OpenAI | None = None
         self._usage_summary = TokenUsageSummary()
 
     @property
@@ -92,6 +94,26 @@ class AIWriter:
                 default_headers=self._settings.default_headers,
             )
         return self._client
+
+    @property
+    def reviewer_client(self) -> OpenAI:
+        """Reviewer 独立 client（有独立配置时使用，否则复用主 client）"""
+        if self._reviewer_client is None:
+            if self._settings.reviewer_api_base:
+                key = (
+                    self._settings.reviewer_api_key.get_secret_value()
+                    if self._settings.reviewer_api_key
+                    else self._settings.api_key.get_secret_value()
+                )
+                headers = self._settings.reviewer_headers or self._settings.default_headers
+                self._reviewer_client = OpenAI(
+                    api_key=key,
+                    base_url=self._settings.reviewer_api_base,
+                    default_headers=headers,
+                )
+            else:
+                self._reviewer_client = self.client
+        return self._reviewer_client
 
     @property
     def usage_summary(self) -> TokenUsageSummary:
@@ -118,6 +140,15 @@ class AIWriter:
         抛出:
             AIResponseParseError: 返回内容为空或缺少标题/正文
         """
+        # AI 身份泄露整体检测：如果响应主体就是身份声明，直接拒绝
+        if check_ai_identity_leak(response[:200]):
+            raise AIResponseParseError(
+                "AI 返回了身份声明而非文章内容，请检查提示词配置"
+            )
+
+        # 逐行过滤残留的身份泄露
+        response = strip_ai_identity_lines(response)
+
         lines = [line for line in response.split("\n") if line.strip()]
         if not lines:
             raise AIResponseParseError("AI 返回内容为空")
@@ -142,6 +173,12 @@ class AIWriter:
         if not title or not body:
             raise AIResponseParseError("AI 返回内容缺少标题或正文")
 
+        if len(body) < ARTICLE_MIN_BODY_LENGTH:
+            raise AIResponseParseError(
+                f"AI 返回正文过短 ({len(body)} 字符 < {ARTICLE_MIN_BODY_LENGTH})，"
+                f"疑似生成失败"
+            )
+
         return ArticleResult(title=title, html_body=body)
 
     def _get_writer_system_prompt(
@@ -157,6 +194,9 @@ class AIWriter:
                 pass
         return self._load_prompt(f"{prefix}.txt")
 
+    # prompt 最小有效长度（低于此值视为空 prompt，拒绝调用）
+    _MIN_PROMPT_LENGTH = 20
+
     def call_claude(
         self,
         prompt: str,
@@ -164,11 +204,18 @@ class AIWriter:
         model: str | None = None,
         max_tokens: int = 4000,
         temperature: float = DEFAULT_TEMPERATURE,
+        use_client: OpenAI | None = None,
     ) -> str:
         """API 调用（带重试 + 模型回退）"""
+        if len(prompt.strip()) < self._MIN_PROMPT_LENGTH:
+            raise AIAPIError(
+                f"Prompt 过短 ({len(prompt.strip())} 字符)，"
+                f"疑似源数据为空，跳过 API 调用"
+            )
         try:
             return self._call_claude_with_retry(
                 prompt, system, model, max_tokens, temperature,
+                use_client=use_client,
             )
         except AIAPIError:
             # 尝试回退模型
@@ -177,6 +224,7 @@ class AIWriter:
                 logger.warning(f"主模型失败，切换到备用模型: {fallback}")
                 return self._call_claude_with_retry(
                     prompt, system, fallback, max_tokens, temperature,
+                    use_client=use_client,
                 )
             raise
 
@@ -206,6 +254,7 @@ class AIWriter:
         model: str | None = None,
         max_tokens: int = 4000,
         temperature: float = DEFAULT_TEMPERATURE,
+        use_client: OpenAI | None = None,
     ) -> str:
         """
         通用 API 调用（带重试）。
@@ -219,7 +268,8 @@ class AIWriter:
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
-            response = self.client.chat.completions.create(
+            active_client = use_client or self.client
+            response = active_client.chat.completions.create(
                 model=model or self._settings.model_writer,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -393,6 +443,13 @@ class AIWriter:
             max_tokens=self._settings.promo_max_tokens,
         )
 
+        # 过滤 AI 身份泄露
+        if check_ai_identity_leak(promo_text[:200]):
+            logger.error("推广文案包含 AI 身份声明，使用回退文案")
+            promo_text = f"📖 {title}\n\n一篇值得阅读的新文章。"
+        else:
+            promo_text = strip_ai_identity_lines(promo_text)
+
         if hashtag:
             promo_text = f"{promo_text}\n\n{hashtag}"
 
@@ -484,6 +541,7 @@ class AIWriter:
             system=system_prompt,
             model=model,
             max_tokens=self._settings.reviewer_max_tokens,
+            use_client=self.reviewer_client,
         )
 
         data = _parse_review_response(response)
@@ -622,6 +680,10 @@ class AIWriter:
         )
 
         tg_promo = data["tg_promo"].strip()
+        # 过滤 tagger 返回的推广文案中的 AI 身份泄露
+        if check_ai_identity_leak(tg_promo):
+            logger.warning("tagger 推广文案包含 AI 身份声明，已清洗")
+            tg_promo = strip_ai_identity_lines(tg_promo).strip()
         promo_len = len(tg_promo)
         if promo_len < TG_PROMO_MIN_LENGTH or promo_len > TG_PROMO_MAX_LENGTH:
             logger.warning(

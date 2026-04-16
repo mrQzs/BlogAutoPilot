@@ -216,6 +216,8 @@ class TagStats:
     tag: str
     level: str       # "magazine" | "science" | "topic" | "content"
     count: int
+    first_seen: str | None = None   # 首次使用时间 (ISO 格式)
+    last_seen: str | None = None    # 末次使用时间 (ISO 格式)
 
 
 @dataclass(frozen=True)
@@ -245,6 +247,7 @@ class TagAuditReport:
     top_cooccurrences: tuple[CooccurrencePair, ...]
     suggestions: tuple[SynonymSuggestion, ...]
     embedding_available: bool
+    orphan_tags: tuple[TagStats, ...] = ()   # 仅使用 1 次且无同义词映射的标签
 
 
 # ── 综述文章数据模型 ──
@@ -259,3 +262,5 @@ class SurveyResult:
     tag_magazine: str
     tag_science: str
     tag_topic: str
+    merged_tags: TagSet | None = None
+    merged_embedding: tuple[float, ...] | None = None
